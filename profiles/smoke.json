@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "suite": {
+    "id": "smoke-v1",
+    "title": "GGUF benchmark pipeline smoke test",
+    "description": "A five-sample connectivity and pipeline check. This is not a publishable benchmark score."
+  },
+  "generation": {"temperature": 0.0, "max_tokens": 2048, "timeout": 600},
+  "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "modelscope", "collect_perf": true},
+  "cases": [
+    {
+      "id": "gsm8k-smoke",
+      "dataset": "gsm8k",
+      "expected_samples": 5,
+      "limit": 5,
+      "dataset_args": {"shuffle": true},
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
+      "prompt_headroom": 4096
+    }
+  ]
+}
