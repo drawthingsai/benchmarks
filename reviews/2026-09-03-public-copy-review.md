@@ -2,6 +2,10 @@
 
 Date: 2026-09-03
 
+## Subsequent user revision
+
+After this review, the maintainer explicitly simplified the public interface. The package entry point and virtual-environment instructions were removed in favor of installing EvalScope directly and running `./run.sh`. The README was shortened accordingly. This direct maintainer decision supersedes the earlier CLI packaging decision recorded below.
+
 ## Review brief
 
 The reviewed copy described a public repository for reproducible comparisons between project-built GGUF artifacts and established community releases. The required product emphasis was reproducibility, simple execution, exact local artifact hashes, stated upstream provenance, fixed benchmark profiles, visible coverage and failures, and Markdown comparison tables. EvalScope 1.11.0 was specified as the pinned evaluation engine, not the identity of the repository.

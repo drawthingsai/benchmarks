@@ -408,7 +408,9 @@ def run(args: argparse.Namespace) -> int:
     try:
         version = importlib.metadata.version("evalscope")
     except importlib.metadata.PackageNotFoundError:
-        raise report.BenchError("EvalScope is not installed; run: pip install -e .") from None
+        raise report.BenchError(
+            "EvalScope is not installed; run: python3 -m pip install evalscope==1.11.0"
+        ) from None
     if version != "1.11.0":
         raise report.BenchError(f"EvalScope 1.11.0 is required, found {version}")
     stamp = report.utc_now().replace(":", "").replace("-", "")
