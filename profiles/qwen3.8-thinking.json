@@ -36,23 +36,11 @@
       "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
     },
     {
-      "id": "bfcl-v3-quick", "dataset": "bfcl_v3", "expected_samples": 100, "limit": 10,
-      "dataset_args": {
-        "subset_list": [
-          "simple", "java", "javascript", "multiple", "parallel", "parallel_multiple",
-          "irrelevance", "live_simple", "live_multiple", "live_parallel"
-        ],
-        "extra_params": {"is_fc_model": true}
-      },
-      "generation": {"max_tokens": 10000},
-      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
-    },
-    {
-      "id": "bfcl-v4-quick", "dataset": "bfcl_v4", "expected_samples": 100, "limit": 10,
+      "id": "bfcl-v4-quick", "dataset": "bfcl_v4", "expected_samples": 200, "limit": 20,
       "dataset_args": {
         "subset_list": [
           "simple_python", "simple_java", "simple_javascript", "multiple", "parallel",
-          "parallel_multiple", "irrelevance", "live_simple", "live_multiple", "live_parallel"
+          "parallel_multiple", "irrelevance", "live_simple", "live_multiple", "live_parallel_multiple"
         ],
         "extra_params": {"is_fc_model": true}
       },

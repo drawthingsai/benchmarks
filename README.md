@@ -33,10 +33,9 @@ export PATH="$PWD/llama.cpp/build/bin:$PATH"
 | Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | 198 | 198 | `mean_acc` |
 | Qwen3.8 thinking | AIME 2026 | `aime26` | 30 | 30 | `mean_acc` |
 | Qwen3.8 thinking | IFEval | `ifeval` | 541 | 541 | `mean_prompt_level_strict` |
-| Qwen3.8 thinking | BFCL v3 Quick | `bfcl_v3` | 4,441 | 100 | `acc` |
-| Qwen3.8 thinking | BFCL v4 Quick | `bfcl_v4` | 5,106 | 100 | `acc` |
+| Qwen3.8 thinking | BFCL v4 Quick | `bfcl_v4` | 5,106 | 200 | `acc` |
 
-Each BFCL Quick run evaluates 10 fixed function-calling categories with 10 examples per category. It excludes BFCL v4 memory and Web Search tasks, so no SerpAPI key is needed.
+BFCL v4 Quick evaluates 10 fixed categories with 20 examples each. It excludes memory and Web Search tasks, so no SerpAPI key is needed.
 
 ## Run a GGUF
 
@@ -92,10 +91,10 @@ python3 benchmark.py compare \
 
 The generated Markdown contains one comparison table. GGUF size and MTP-free size are detected from the file automatically.
 
-| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v3 Quick | BFCL v4 Quick |
-|---|---:|:---:|---:|---:|---:|---:|---:|---:|
-| Project GGUF | ... | Yes | ... | ... | ... | ... | ... | ... |
-| Community GGUF | ... | No | ... | ... | ... | ... | ... | ... |
+| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v4 Quick |
+|---|---:|:---:|---:|---:|---:|---:|---:|
+| Project GGUF | ... | Yes | ... | ... | ... | ... | ... |
+| Community GGUF | ... | No | ... | ... | ... | ... | ... |
 
 Runs can be compared only when their profile SHA-256 values match. No HTML or composite score is generated.
 
