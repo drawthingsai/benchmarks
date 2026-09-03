@@ -9,7 +9,7 @@
     "temperature": 1.0,
     "top_p": 0.95,
     "top_k": 20,
-    "max_tokens": 81920,
+    "max_tokens": 262144,
     "timeout": 21600,
     "extra_body": {
       "min_p": 0.0,
@@ -23,26 +23,17 @@
     {
       "id": "gpqa-diamond", "dataset": "gpqa_diamond", "expected_samples": 198,
       "dataset_args": {"eval_split": "train", "shuffle": false},
-      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
-      "prompt_headroom": 8192
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
     },
     {
-      "id": "aime-2024", "dataset": "aime24", "expected_samples": 30,
+      "id": "aime-2026", "dataset": "aime26", "expected_samples": 30,
       "dataset_args": {"eval_split": "test", "shuffle": false},
-      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
-      "prompt_headroom": 8192
-    },
-    {
-      "id": "aime-2025", "dataset": "aime25", "expected_samples": 30,
-      "dataset_args": {"eval_split": "test", "shuffle": false},
-      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
-      "prompt_headroom": 8192
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
     },
     {
       "id": "ifeval", "dataset": "ifeval", "expected_samples": 541,
       "dataset_args": {"eval_split": "train", "shuffle": false},
-      "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"},
-      "prompt_headroom": 8192
+      "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
     }
   ]
 }

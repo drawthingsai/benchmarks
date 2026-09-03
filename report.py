@@ -110,8 +110,7 @@ def load_profile(path: Path) -> dict[str, Any]:
         if not isinstance(case, dict):
             raise BenchError(f"{label} must be an object")
         allowed_case = {"id", "dataset", "primary_metric", "expected_samples", "limit",
-                        "repeats", "dataset_args", "generation", "sandbox_required",
-                        "prompt_headroom"}
+                        "repeats", "dataset_args", "generation", "sandbox_required"}
         unknown_case = set(case) - allowed_case
         if unknown_case:
             raise BenchError(f"Unknown field(s) in {label}: {', '.join(sorted(unknown_case))}")
@@ -141,8 +140,6 @@ def load_profile(path: Path) -> dict[str, Any]:
         case["resolved_generation"] = resolved
         case["planned_samples"] = case["expected_samples"] * case.get("repeats", 1)
         case.setdefault("dataset_args", {})
-        case.setdefault("prompt_headroom", 4096)
-        _positive_int(case["prompt_headroom"], f"{label}.prompt_headroom", zero=True)
     return profile
 
 
@@ -309,61 +306,36 @@ def _score(metric: dict[str, Any] | None) -> str:
     return f"{value * 100:.2f}%" if metric.get("scale") == "fraction" else f"{value:.4f}"
 
 
-def _ratio(numerator: Any, denominator: Any) -> str:
-    if not isinstance(numerator, int) or not isinstance(denominator, int) or denominator <= 0:
-        return "—"
-    return f"{numerator}/{denominator} ({100 * numerator / denominator:.1f}%)"
+def _size(value: Any) -> str:
+    return f"{value / 2**30:.2f} GiB" if isinstance(value, int) else "—"
+
+
+def _result_table(summaries: list[dict[str, Any]]) -> list[str]:
+    cases = summaries[0]["cases"]
+    benchmark_headers = []
+    for index, case in enumerate(cases):
+        metric = next((summary["cases"][index].get("primary_metric") for summary in summaries
+                       if summary["cases"][index].get("primary_metric")), None)
+        benchmark_headers.append(
+            f"{case['case_id']} ({metric['name'] if metric else 'score'})")
+    headers = ["Model / GGUF", "GGUF size", "MTP", "Size without MTP", *benchmark_headers]
+    lines = ["| " + " | ".join(_cell(value) for value in headers) + " |",
+             "|---|---:|:---:|---:|" + "---:|" * len(benchmark_headers)]
+    for summary in summaries:
+        backend = summary["manifest"].get("backend", {})
+        artifact = backend.get("gguf", {})
+        has_mtp = artifact.get("has_mtp")
+        mtp = "Yes" if has_mtp is True else "No" if has_mtp is False else "—"
+        values = [backend.get("model"), _size(artifact.get("size_bytes")), mtp,
+                  _size(artifact.get("size_without_mtp_bytes")),
+                  *(_score(case.get("primary_metric")) for case in summary["cases"])]
+        lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
+    return lines
 
 
 def markdown(summary: dict[str, Any]) -> str:
-    cases = summary["cases"]
-    planned = sum(item["coverage"].get("planned", 0) for item in cases)
-    unique = sum(item["coverage"].get("unique", 0) for item in cases)
-    alerts = [(item["case_id"], alert) for item in cases for alert in item["alerts"]]
     lines = [f"# {summary['suite'].get('title', summary['suite']['id'])}", "",
-             summary["suite"].get("description", ""), "", "## Run health", "",
-             "| Status | Run ID | Cases | Unique sample coverage | Alerts |",
-             "|---|---|---:|---:|---:|",
-             f"| {summary['status']} | {summary['run_id']} | {len(cases)} | "
-             f"{_ratio(unique, planned)} | {len(alerts)} |", "", "## Results", "",
-             "| Case | Status | Primary metric | Score | Scored / planned | Responses | Unparsed | Capped | Errors |",
-             "|---|---:|---|---:|---:|---:|---:|---:|---:|"]
-    for item in cases:
-        metric, coverage = item["primary_metric"], item["coverage"]
-        lines.append(f"| {item['case_id']} | {item['status']} | "
-                     f"{metric.get('name') if metric else '—'} | {_score(metric)} | "
-                     f"{_ratio(coverage.get('scored'), coverage['planned'])} | "
-                     f"{coverage.get('responded', 0)} | "
-                     f"{max(0, coverage.get('responded', 0) - coverage.get('parsed', 0))} | "
-                     f"{coverage.get('capped', 0)} | {coverage.get('errors', 0)} |")
-    lines.extend(["", "## Coverage detail", "",
-                  "| Case | Planned | Prediction rows | Responded | Non-empty | Parsed | Scored | Unique | Missing | Duplicates |",
-                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
-    fields = ("planned", "prediction_rows", "responded", "nonempty", "parsed", "scored",
-              "unique", "missing", "duplicates")
-    for item in cases:
-        coverage = item["coverage"]
-        lines.append("| " + item["case_id"] + " | "
-                     + " | ".join(str(coverage.get(field, "—")) for field in fields) + " |")
-    if alerts:
-        lines.extend(["", "## Alerts", "", "| Case | Alert |", "|---|---|"])
-        lines.extend(f"| {_cell(case)} | {_cell(alert)} |" for case, alert in alerts)
-    manifest = summary["manifest"]
-    backend = manifest.get("backend", {})
-    artifact = backend.get("gguf", {})
-    provenance = backend.get("artifact_provenance", {})
-    lines.extend(["", "## Reproducibility", "",
-                  "| Field | Value |", "|---|---|",
-                  f"| EvalScope | {_cell(manifest.get('evalscope_version'))} |",
-                  f"| Profile SHA-256 | {_cell((manifest.get('profile') or {}).get('sha256'))} |",
-                  f"| Backend | {_cell(backend.get('type'))} |",
-                  f"| Model label | {_cell(backend.get('model'))} |",
-                  f"| Artifact | {_cell(Path(artifact['path']).name if artifact.get('path') else backend.get('url'))} |",
-                  f"| Artifact SHA-256 | {_cell(artifact.get('sha256'))} |",
-                  f"| Source | {_cell(provenance.get('source_url'))} |",
-                  f"| Source revision | {_cell(provenance.get('source_revision'))} |",
-                  f"| Quantization | {_cell(provenance.get('quantization'))} |", "",
-                  "> Scores from different benchmarks are intentionally not combined into a composite score.", ""])
+             *_result_table([summary]), ""]
     return "\n".join(lines)
 
 
@@ -390,40 +362,9 @@ def comparison(run_dirs: list[Path], title: str) -> str:
         raise BenchError("Compared runs do not contain the same ordered benchmark cases")
     labels = [item["manifest"]["backend"]["model"] for item in summaries]
     if len(set(labels)) != len(labels):
-        raise BenchError("Compared runs must have unique model labels; set --model when running")
+        raise BenchError("Compared runs must have unique model names; set --model-name when running")
 
-    first_cases = summaries[0]["cases"]
-    headers = []
-    for index, case in enumerate(first_cases):
-        metric = next((item["cases"][index].get("primary_metric") for item in summaries
-                       if item["cases"][index].get("primary_metric")), None)
-        headers.append(f"{case['case_id']} ({metric['name'] if metric else 'score'})")
-    lines = [f"# {title}", "", summaries[0]["suite"].get("description", ""), "",
-             "## Benchmark scores", "", "| Model / GGUF | Run health | "
-             + " | ".join(_cell(header) for header in headers) + " |",
-             "|---|---:|" + "---:|" * len(headers)]
-    for label, summary in zip(labels, summaries):
-        lines.append("| " + _cell(label) + " | " + _cell(summary["status"]) + " | "
-                     + " | ".join(_score(case.get("primary_metric"))
-                                    for case in summary["cases"]) + " |")
-
-    lines.extend(["", "## Artifact provenance", "",
-                  "| Model / GGUF | Run ID | Backend | Artifact | Bytes | SHA-256 | Source | Revision | Quantization |",
-                  "|---|---|---|---|---:|---|---|---|---|"])
-    for label, summary in zip(labels, summaries):
-        backend = summary["manifest"]["backend"]
-        artifact = backend.get("gguf", {})
-        provenance = backend.get("artifact_provenance", {})
-        lines.append("| " + " | ".join(_cell(value) for value in (
-            label, summary.get("run_id"), backend.get("type"),
-            Path(artifact["path"]).name if artifact.get("path") else backend.get("url"),
-            artifact.get("size_bytes"), artifact.get("sha256"), provenance.get("source_url"),
-            provenance.get("source_revision"), provenance.get("quantization"))) + " |")
-    lines.extend(["", "## Reproduction contract", "",
-                  "| Suite | Profile SHA-256 | Missing results | Composite score |",
-                  "|---|---|---|---|",
-                  f"| {summaries[0]['suite']['id']} | {next(iter(profile_hashes))} | Preserved as — | Not calculated |",
-                  "", "Every score can be traced to its run manifest and raw evaluator artifacts.", ""])
+    lines = [f"# {title}", "", *_result_table(summaries), ""]
     return "\n".join(lines)
 
 

@@ -9,9 +9,11 @@ import http.client
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -28,8 +30,13 @@ import report
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILE = ROOT / "profiles" / "smoke.json"
+LLAMA_CPP_COMMIT = "0df974d777c904dda1da3b00faa7769c6310ae74"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
+GGUF_SCALARS = {
+    0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f",
+    7: "?", 10: "Q", 11: "q", 12: "d",
+}
 
 
 def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -40,9 +47,97 @@ def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def safe_name(value: str) -> str:
-    import re
+def _gguf_read(handle: Any, size: int) -> bytes:
+    value = handle.read(size)
+    if len(value) != size:
+        raise report.BenchError("The GGUF header is truncated")
+    return value
 
+
+def _gguf_string(handle: Any) -> str:
+    length = struct.unpack("<Q", _gguf_read(handle, 8))[0]
+    return _gguf_read(handle, length).decode("utf-8", errors="replace")
+
+
+def _gguf_skip_value(handle: Any, value_type: int) -> None:
+    if value_type in GGUF_SCALARS:
+        handle.seek(struct.calcsize("<" + GGUF_SCALARS[value_type]), os.SEEK_CUR)
+    elif value_type == 8:
+        handle.seek(struct.unpack("<Q", _gguf_read(handle, 8))[0], os.SEEK_CUR)
+    elif value_type == 9:
+        item_type, count = struct.unpack("<IQ", _gguf_read(handle, 12))
+        if item_type in GGUF_SCALARS:
+            handle.seek(struct.calcsize("<" + GGUF_SCALARS[item_type]) * count, os.SEEK_CUR)
+        else:
+            for _ in range(count):
+                _gguf_skip_value(handle, item_type)
+    else:
+        raise report.BenchError(f"Unsupported GGUF value type: {value_type}")
+
+
+def gguf_inventory(path: Path) -> dict[str, Any]:
+    """Read file size and MTP payload size without loading tensor data."""
+    file_size = path.stat().st_size
+    with path.open("rb") as handle:
+        if _gguf_read(handle, 4) != b"GGUF":
+            raise report.BenchError(f"Not a GGUF file: {path}")
+        version = struct.unpack("<I", _gguf_read(handle, 4))[0]
+        if version not in {2, 3}:
+            raise report.BenchError(f"Unsupported GGUF version {version}: {path}")
+        tensor_count, field_count = struct.unpack("<QQ", _gguf_read(handle, 16))
+        alignment = 32
+        for _ in range(field_count):
+            key = _gguf_string(handle)
+            value_type = struct.unpack("<I", _gguf_read(handle, 4))[0]
+            if key == "general.alignment" and value_type == 4:
+                alignment = struct.unpack("<I", _gguf_read(handle, 4))[0]
+            else:
+                _gguf_skip_value(handle, value_type)
+        tensors: list[tuple[str, int]] = []
+        for _ in range(tensor_count):
+            name = _gguf_string(handle)
+            dimensions = struct.unpack("<I", _gguf_read(handle, 4))[0]
+            handle.seek(8 * dimensions + 4, os.SEEK_CUR)
+            offset = struct.unpack("<Q", _gguf_read(handle, 8))[0]
+            tensors.append((name, offset))
+        data_offset = (handle.tell() + alignment - 1) // alignment * alignment
+
+    mtp_layers = {
+        int(match.group(1))
+        for name, _ in tensors
+        if (match := re.match(r"^blk\.(\d+)\..*nextn", name))
+    }
+    ordered = sorted(tensors, key=lambda item: item[1])
+    mtp_bytes = 0
+    for index, (name, offset) in enumerate(ordered):
+        next_offset = ordered[index + 1][1] if index + 1 < len(ordered) else file_size - data_offset
+        match = re.match(r"^blk\.(\d+)\.", name)
+        if match and int(match.group(1)) in mtp_layers:
+            mtp_bytes += max(0, next_offset - offset)
+    return {
+        "path": str(path.resolve()),
+        "size_bytes": file_size,
+        "has_mtp": bool(mtp_layers),
+        "mtp_bytes": mtp_bytes,
+        "size_without_mtp_bytes": file_size - mtp_bytes,
+    }
+
+
+def llama_server_identity(binary: str) -> str:
+    try:
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise report.BenchError(f"Could not read llama-server version: {exc}") from exc
+    identity = " ".join(f"{result.stdout}\n{result.stderr}".split())
+    if result.returncode or LLAMA_CPP_COMMIT[:9] not in identity:
+        raise report.BenchError(
+            f"llama-server must be built from llama.cpp {LLAMA_CPP_COMMIT}; found: "
+            f"{identity or 'unknown version'}")
+    return identity
+
+
+def safe_name(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
     return normalized[:80] or "run"
 
@@ -118,7 +213,7 @@ def probe(base_url: str, *, key: str | None = None, key_header: str = "Authoriza
         result["warning"] = f"The requested model {model!r} was not listed by /models"
     if generate:
         if not model:
-            raise report.BenchError("A generation probe requires --model")
+            raise report.BenchError("A generation probe requires --model-name")
         result["generation_http_status"], _ = request(
             base_url, "chat/completions", key=key, key_header=key_header, key_prefix=key_prefix,
             method="POST", timeout=60,
@@ -230,7 +325,9 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
             argv = [binary, "--model", str(self.args.gguf.resolve()), "--alias", self.model,
                     "--host", "127.0.0.1", "--port", str(self.port),
                     "--ctx-size", str(self.args.ctx_size), "--parallel", str(self.args.parallel),
-                    "--n-gpu-layers", str(self.args.gpu_layers), "--jinja", "--no-webui"]
+                    "--n-gpu-layers", str(self.args.gpu_layers),
+                    "--cache-type-k", "f16", "--cache-type-v", "f16",
+                    "--jinja", "--no-context-shift", "--no-webui"]
             self.process = subprocess.Popen(argv, stdout=self.handle, stderr=subprocess.STDOUT,
                                             start_new_session=True)
             deadline = time.monotonic() + self.args.startup_timeout
@@ -345,24 +442,21 @@ def parser() -> argparse.ArgumentParser:
     backend = run.add_mutually_exclusive_group(required=True)
     backend.add_argument("--gguf", type=Path)
     backend.add_argument("--url")
-    run.add_argument("--model", help="required for URL; defaults to the GGUF file name locally")
+    run.add_argument("--model-name", help="display name and remote API model name")
     run.add_argument("--api-key-env", help="environment variable containing the API key")
     run.add_argument("--api-key-header", default="Authorization")
     run.add_argument("--api-key-prefix", default="Bearer ")
-    run.add_argument("--source-url", help="canonical repository or artifact URL")
-    run.add_argument("--source-revision", help="source commit, tag, or revision")
-    run.add_argument("--quantization", help="quantization method or recipe name")
     run.add_argument("--output-dir", type=Path, default=Path("runs"))
     run.add_argument("--run-id")
     run.add_argument("--llama-server", default="llama-server")
     run.add_argument("--ctx-size", type=int, default=32768)
-    run.add_argument("--parallel", type=int, default=1)
+    run.add_argument("--parallel", type=int, default=8)
     run.add_argument("--gpu-layers", type=int, default=999)
     run.add_argument("--startup-timeout", type=int, default=300)
     run.add_argument("--dry-run", action="store_true")
     doctor = commands.add_parser("doctor", help="probe a remote endpoint")
     doctor.add_argument("--url", required=True)
-    doctor.add_argument("--model")
+    doctor.add_argument("--model-name")
     doctor.add_argument("--api-key-env")
     doctor.add_argument("--api-key-header", default="Authorization")
     doctor.add_argument("--api-key-prefix", default="Bearer ")
@@ -383,20 +477,19 @@ def run(args: argparse.Namespace) -> int:
     if args.gguf:
         if not args.gguf.is_file():
             raise report.BenchError(f"GGUF file does not exist: {args.gguf}")
-        model = args.model or safe_name(args.gguf.stem)
+        model = args.model_name or args.gguf.name
         if args.ctx_size <= 0 or args.parallel <= 0 or args.ctx_size % args.parallel:
             raise report.BenchError("--ctx-size must be positive and divisible by --parallel")
-        required = max(case["resolved_generation"]["max_tokens"] + case["prompt_headroom"]
-                       for case in profile["cases"])
+        required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
         if args.ctx_size // args.parallel < required:
             raise report.BenchError(f"Per-slot context is {args.ctx_size // args.parallel:,}; "
                                     f"the profile requires at least {required:,}")
         public_endpoint = "managed local llama.cpp endpoint"
     else:
-        if not args.model:
-            raise report.BenchError("--model is required with --url")
+        if not args.model_name:
+            raise report.BenchError("--model-name is required with --url")
         validate_url(args.url)
-        model, public_endpoint = args.model, redact_url(args.url)
+        model, public_endpoint = args.model_name, redact_url(args.url)
     plan = {"profile": str(args.profile.resolve()), "suite": profile["suite"],
             "backend": "gguf" if args.gguf else "url", "model": model,
             "endpoint": public_endpoint,
@@ -425,22 +518,16 @@ def run(args: argparse.Namespace) -> int:
         binary = shutil.which(args.llama_server)
         if not binary:
             raise report.BenchError(f"llama-server was not found: {args.llama_server}")
+        server_identity = llama_server_identity(binary)
         backend = {"type": "gguf", "model": model,
-                   "gguf": {"path": str(args.gguf.resolve()), "size_bytes": args.gguf.stat().st_size,
-                            "sha256": sha256_file(args.gguf)},
-                   "llama_server": {"path": binary, "sha256": sha256_file(Path(binary))},
+                   "gguf": gguf_inventory(args.gguf),
+                   "llama_server": {"path": binary, "version": server_identity,
+                                    "commit": LLAMA_CPP_COMMIT},
                    "ctx_size": args.ctx_size, "parallel": args.parallel,
                    "slot_context": args.ctx_size // args.parallel, "gpu_layers": args.gpu_layers}
     else:
         backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
                    "api_key_env": args.api_key_env, "api_key_header": args.api_key_header}
-    backend["artifact_provenance"] = {
-        key: value for key, value in {
-            "source_url": args.source_url,
-            "source_revision": args.source_revision,
-            "quantization": args.quantization,
-        }.items() if value
-    }
     manifest = {"schema_version": 1, "run_id": run_id, "created_at": report.utc_now(),
                 "evalscope_version": version,
                 "profile": {"file": "profile.json", "source": str(args.profile.resolve()),
@@ -478,7 +565,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             key = resolve_key(args.api_key_env)
             result = probe(args.url, key=key, key_header=args.api_key_header,
-                           key_prefix=args.api_key_prefix, model=args.model, generate=args.generate)
+                           key_prefix=args.api_key_prefix, model=args.model_name,
+                           generate=args.generate)
             result["endpoint"] = redact_url(args.url)
             print(json.dumps(result, indent=2))
         elif args.command == "report":

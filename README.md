@@ -9,17 +9,29 @@ Python 3.10+ is required. Local GGUF evaluation also needs `llama-server` on `PA
 ```bash
 git clone https://github.com/drawthingsai/benchmarks.git
 cd benchmarks
+
+conda create -n benchmarks python=3.12
+conda activate benchmarks
+
 python3 -m pip install evalscope==1.11.0
+```
+
+For local GGUF runs, use llama.cpp commit `0df974d777c904dda1da3b00faa7769c6310ae74` (`llama.cpp 0.3.0-dev`, build `474`). Build `llama-server` from that exact revision and place `llama.cpp/build/bin` on `PATH`:
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+git -C llama.cpp checkout 0df974d777c904dda1da3b00faa7769c6310ae74
+cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+cmake --build llama.cpp/build --target llama-server -j
+export PATH="$PWD/llama.cpp/build/bin:$PATH"
 ```
 
 ## Datasets
 
 | Profile | Dataset | EvalScope ID | Split | Dataset rows | Evaluated rows | Primary metric |
 |---|---|---|---|---:|---:|---|
-| Smoke | GSM8K | `gsm8k` | `test` | 1,319 | 5 | `mean_acc` |
 | Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | `train` | 198 | 198 | `mean_acc` |
-| Qwen3.8 thinking | AIME 2024 | `aime24` | `test` | 30 | 30 | `mean_acc` |
-| Qwen3.8 thinking | AIME 2025 | `aime25` | `test` | 30 | 30 | `mean_acc` |
+| Qwen3.8 thinking | AIME 2026 | `aime26` | `test` | 30 | 30 | `mean_acc` |
 | Qwen3.8 thinking | IFEval | `ifeval` | `train` | 541 | 541 | `mean_prompt_level_strict` |
 
 ## Run a GGUF
@@ -36,15 +48,34 @@ Use the public comparison profile for a real run:
 python3 benchmark.py run \
   --profile profiles/qwen3.8-thinking.json \
   --gguf /path/to/model.gguf \
-  --model project-q2-k \
+  --model-name project-q2-k \
   --run-id project-q2-k \
-  --ctx-size 98304 \
-  --source-url https://huggingface.co/owner/repository \
-  --source-revision COMMIT_OR_TAG \
-  --quantization "standard llama.cpp Q2_K"
+  --ctx-size 262144 \
+  --parallel 1
 ```
 
-Repeat the same command for each community GGUF, changing only its path, label, run ID, and provenance. Use `--dry-run` to inspect a run without loading the model.
+`--model-name` is optional for a local file; its full GGUF filename is used by default. Repeat the command for each community GGUF. Use `--dry-run` to inspect a run without loading the model.
+
+Qwen3.8 provides a native 262,144-token context window, and the profile uses the same value as its generation ceiling. No fixed prompt allowance is configured: llama-server uses the actual prompt length and stops generation when the remaining context is exhausted. A prompt that alone exceeds the model context is reported as an error.
+
+The command above starts llama-server with these effective arguments:
+
+```text
+--model MODEL.gguf
+--alias MODEL
+--host 127.0.0.1
+--port AUTO_ASSIGNED
+--ctx-size 262144
+--parallel 1
+--n-gpu-layers 999
+--cache-type-k f16
+--cache-type-v f16
+--jinja
+--no-context-shift
+--no-webui
+```
+
+The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
 
 ## Compare results
 
@@ -57,12 +88,12 @@ python3 benchmark.py compare \
   --output results/qwen3.8-27b.md
 ```
 
-The generated Markdown keeps every benchmark separate, preserves missing results, and includes run health plus GGUF filename, size, SHA-256, source revision, and quantization method.
+The generated Markdown contains one comparison table. GGUF size and MTP-free size are detected from the file automatically.
 
-| Model / GGUF | Run health | GPQA Diamond | AIME 2024 | AIME 2025 | IFEval |
-|---|---:|---:|---:|---:|---:|
-| Project GGUF | pass | ... | ... | ... | ... |
-| Community GGUF | pass | ... | ... | ... | ... |
+| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval |
+|---|---:|:---:|---:|---:|---:|---:|
+| Project GGUF | ... | Yes | ... | ... | ... | ... |
+| Community GGUF | ... | No | ... | ... | ... | ... |
 
 Runs can be compared only when their profile SHA-256 values match. No HTML or composite score is generated.
 
@@ -72,10 +103,12 @@ Runs can be compared only when their profile SHA-256 values match. No HTML or co
 export MODEL_API_KEY='...'
 python3 benchmark.py run \
   --url https://provider.example/v1 \
-  --model model-id \
+  --model-name model-id \
   --api-key-env MODEL_API_KEY
 ```
 
-The API key is optional and is not written to process arguments, manifests, or logs.
+The URL is the OpenAI-compatible API endpoint. `--model-name` is the API model identifier and the name shown in the report. The API key is optional and is not written to process arguments, manifests, or logs.
+
+The bundled GPQA Diamond, AIME 2026, IFEval, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
 
 Results are stored under `runs/<run-id>/`. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
