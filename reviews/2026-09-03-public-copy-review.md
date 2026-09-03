@@ -4,7 +4,7 @@ Date: 2026-09-03
 
 ## Subsequent user revision
 
-After this review, the maintainer explicitly simplified the public interface. The package entry point and virtual-environment instructions were removed in favor of installing EvalScope directly and running `./run.sh`. The README was shortened accordingly. This direct maintainer decision supersedes the earlier CLI packaging decision recorded below.
+After this review, the maintainer explicitly simplified the public interface. The package entry point and virtual-environment instructions were removed in favor of installing EvalScope directly and calling `python3 benchmark.py`. The README was shortened accordingly. This direct maintainer decision supersedes the earlier CLI packaging decision recorded below.
 
 ## Review brief
 

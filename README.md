@@ -17,13 +17,13 @@ python3 -m pip install evalscope==1.11.0
 The default command runs a five-sample GSM8K smoke test:
 
 ```bash
-./run.sh --gguf /path/to/model.gguf
+python3 benchmark.py run --gguf /path/to/model.gguf
 ```
 
 Use the public comparison profile for a real run:
 
 ```bash
-./run.sh \
+python3 benchmark.py run \
   --profile profiles/qwen3.8-thinking.json \
   --gguf /path/to/model.gguf \
   --model project-q2-k \
@@ -39,7 +39,7 @@ Repeat the same command for each community GGUF, changing only its path, label, 
 ## Compare results
 
 ```bash
-./run.sh compare \
+python3 benchmark.py compare \
   runs/project-q2-k \
   runs/community-a-q2-k \
   runs/community-b-q2-k \
@@ -60,7 +60,7 @@ Runs can be compared only when their profile SHA-256 values match. No HTML or co
 
 ```bash
 export MODEL_API_KEY='...'
-./run.sh \
+python3 benchmark.py run \
   --url https://provider.example/v1 \
   --model model-id \
   --api-key-env MODEL_API_KEY
@@ -68,4 +68,4 @@ export MODEL_API_KEY='...'
 
 The API key is optional and is not written to process arguments, manifests, or logs.
 
-Results are stored under `runs/<run-id>/`. Rebuild a report with `./run.sh report runs/<run-id>`.
+Results are stored under `runs/<run-id>/`. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
