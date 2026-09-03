@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "suite": {
-    "id": "qwen3.8-thinking-v1",
-    "title": "Qwen3.8 reasoning and instruction suite",
+    "id": "qwen3.8-thinking-v2",
+    "title": "Qwen3.8 reasoning, instruction, and function-calling suite",
     "description": "A reproducible public profile using Qwen3.8 official thinking-mode sampling and the default xhigh reasoning effort."
   },
   "generation": {
@@ -34,6 +34,30 @@
       "id": "ifeval", "dataset": "ifeval", "expected_samples": 541,
       "dataset_args": {"eval_split": "train", "shuffle": false},
       "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "bfcl-v3-quick", "dataset": "bfcl_v3", "expected_samples": 100, "limit": 10,
+      "dataset_args": {
+        "subset_list": [
+          "simple", "java", "javascript", "multiple", "parallel", "parallel_multiple",
+          "irrelevance", "live_simple", "live_multiple", "live_parallel"
+        ],
+        "extra_params": {"is_fc_model": true}
+      },
+      "generation": {"max_tokens": 10000},
+      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "bfcl-v4-quick", "dataset": "bfcl_v4", "expected_samples": 100, "limit": 10,
+      "dataset_args": {
+        "subset_list": [
+          "simple_python", "simple_java", "simple_javascript", "multiple", "parallel",
+          "parallel_multiple", "irrelevance", "live_simple", "live_multiple", "live_parallel"
+        ],
+        "extra_params": {"is_fc_model": true}
+      },
+      "generation": {"max_tokens": 10000},
+      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Reproducible GGUF Comparisons
 
-Reproduce comparisons between project-built and community GGUF files on GPQA Diamond, AIME, IFEval, and other fixed benchmark profiles. EvalScope 1.11.0 is the evaluation engine; this repository provides the runner and clean Markdown result tables.
+Reproduce comparisons between project-built and community GGUF files on GPQA Diamond, AIME, IFEval, and BFCL. EvalScope 1.11.0 is the evaluation engine; this repository provides the runner and clean Markdown result tables.
 
 ## Install
 
@@ -13,7 +13,7 @@ cd benchmarks
 conda create -n benchmarks python=3.12
 conda activate benchmarks
 
-python3 -m pip install evalscope==1.11.0
+python3 -m pip install 'evalscope[bfcl]==1.11.0'
 ```
 
 For local GGUF runs, use llama.cpp commit `0df974d777c904dda1da3b00faa7769c6310ae74` (`llama.cpp 0.3.0-dev`, build `474`). Build `llama-server` from that exact revision and place `llama.cpp/build/bin` on `PATH`:
@@ -28,11 +28,15 @@ export PATH="$PWD/llama.cpp/build/bin:$PATH"
 
 ## Datasets
 
-| Profile | Dataset | EvalScope ID | Split | Dataset rows | Evaluated rows | Primary metric |
-|---|---|---|---|---:|---:|---|
-| Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | `train` | 198 | 198 | `mean_acc` |
-| Qwen3.8 thinking | AIME 2026 | `aime26` | `test` | 30 | 30 | `mean_acc` |
-| Qwen3.8 thinking | IFEval | `ifeval` | `train` | 541 | 541 | `mean_prompt_level_strict` |
+| Profile | Dataset | EvalScope ID | Dataset rows | Evaluated rows | Primary metric |
+|---|---|---|---:|---:|---|
+| Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | 198 | 198 | `mean_acc` |
+| Qwen3.8 thinking | AIME 2026 | `aime26` | 30 | 30 | `mean_acc` |
+| Qwen3.8 thinking | IFEval | `ifeval` | 541 | 541 | `mean_prompt_level_strict` |
+| Qwen3.8 thinking | BFCL v3 Quick | `bfcl_v3` | 4,441 | 100 | `acc` |
+| Qwen3.8 thinking | BFCL v4 Quick | `bfcl_v4` | 5,106 | 100 | `acc` |
+
+Each BFCL Quick run evaluates 10 fixed function-calling categories with 10 examples per category. It excludes BFCL v4 memory and Web Search tasks, so no SerpAPI key is needed.
 
 ## Run a GGUF
 
@@ -49,9 +53,7 @@ python3 benchmark.py run \
   --profile profiles/qwen3.8-thinking.json \
   --gguf /path/to/model.gguf \
   --model-name project-q2-k \
-  --run-id project-q2-k \
-  --ctx-size 262144 \
-  --parallel 1
+  --run-id project-q2-k
 ```
 
 `--model-name` is optional for a local file; its full GGUF filename is used by default. Repeat the command for each community GGUF. Use `--dry-run` to inspect a run without loading the model.
@@ -65,8 +67,8 @@ The command above starts llama-server with these effective arguments:
 --alias MODEL
 --host 127.0.0.1
 --port AUTO_ASSIGNED
---ctx-size 262144
---parallel 1
+--ctx-size PROFILE_LIMIT_TIMES_SLOTS
+--parallel AUTO_SLOTS
 --n-gpu-layers 999
 --cache-type-k f16
 --cache-type-v f16
@@ -75,7 +77,7 @@ The command above starts llama-server with these effective arguments:
 --no-webui
 ```
 
-The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
+The runner matches the slot count to EvalScope's concurrent batch size and the accelerators visible to llama.cpp, capped at four. The bundled profiles use one concurrent request, so this profile defaults to `--parallel 1 --ctx-size 262144` on every GPU configuration. Override `--parallel` only when the evaluator sends concurrent requests; total context grows by the same factor. The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
 
 ## Compare results
 
@@ -90,10 +92,10 @@ python3 benchmark.py compare \
 
 The generated Markdown contains one comparison table. GGUF size and MTP-free size are detected from the file automatically.
 
-| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval |
-|---|---:|:---:|---:|---:|---:|---:|
-| Project GGUF | ... | Yes | ... | ... | ... | ... |
-| Community GGUF | ... | No | ... | ... | ... | ... |
+| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v3 Quick | BFCL v4 Quick |
+|---|---:|:---:|---:|---:|---:|---:|---:|---:|
+| Project GGUF | ... | Yes | ... | ... | ... | ... | ... | ... |
+| Community GGUF | ... | No | ... | ... | ... | ... | ... | ... |
 
 Runs can be compared only when their profile SHA-256 values match. No HTML or composite score is generated.
 
@@ -109,6 +111,6 @@ python3 benchmark.py run \
 
 The URL is the OpenAI-compatible API endpoint. `--model-name` is the API model identifier and the name shown in the report. The API key is optional and is not written to process arguments, manifests, or logs.
 
-The bundled GPQA Diamond, AIME 2026, IFEval, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
+The bundled GPQA Diamond, AIME 2026, IFEval, BFCL, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
 
 Results are stored under `runs/<run-id>/`. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.

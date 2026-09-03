@@ -137,6 +137,19 @@ def llama_server_identity(binary: str) -> str:
     return identity
 
 
+def accelerator_count(binary: str) -> int:
+    """Count accelerators visible to llama.cpp, falling back to CPU-only execution."""
+    try:
+        result = subprocess.run([binary, "--list-devices"], capture_output=True, text=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    if result.returncode:
+        return 1
+    devices = re.findall(r"^\s+\S+\d+:\s", f"{result.stdout}\n{result.stderr}", re.MULTILINE)
+    return max(1, len(devices))
+
+
 def safe_name(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
     return normalized[:80] or "run"
@@ -449,8 +462,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--output-dir", type=Path, default=Path("runs"))
     run.add_argument("--run-id")
     run.add_argument("--llama-server", default="llama-server")
-    run.add_argument("--ctx-size", type=int, default=32768)
-    run.add_argument("--parallel", type=int, default=8)
+    run.add_argument("--ctx-size", type=int,
+                     help="total server context; defaults to profile limit times resolved slots")
+    run.add_argument("--parallel", type=int,
+                     help="server slots; defaults to evaluator concurrency and visible accelerators, capped at four")
     run.add_argument("--gpu-layers", type=int, default=999)
     run.add_argument("--startup-timeout", type=int, default=300)
     run.add_argument("--dry-run", action="store_true")
@@ -477,13 +492,29 @@ def run(args: argparse.Namespace) -> int:
     if args.gguf:
         if not args.gguf.is_file():
             raise report.BenchError(f"GGUF file does not exist: {args.gguf}")
+        binary = shutil.which(args.llama_server)
+        if not binary:
+            raise report.BenchError(f"llama-server was not found: {args.llama_server}")
         model = args.model_name or args.gguf.name
+        required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
+        if args.parallel is None:
+            batch_size = profile.get("evalscope", {}).get("eval_batch_size", 1)
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+                raise report.BenchError("profile.evalscope.eval_batch_size must be a positive integer")
+            args.parallel = min(4, batch_size, accelerator_count(binary))
+        if args.parallel <= 0:
+            raise report.BenchError("--parallel must be positive")
+        if args.ctx_size is None:
+            args.ctx_size = required * args.parallel
         if args.ctx_size <= 0 or args.parallel <= 0 or args.ctx_size % args.parallel:
             raise report.BenchError("--ctx-size must be positive and divisible by --parallel")
-        required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
         if args.ctx_size // args.parallel < required:
-            raise report.BenchError(f"Per-slot context is {args.ctx_size // args.parallel:,}; "
-                                    f"the profile requires at least {required:,}")
+            minimum_total = required * args.parallel
+            raise report.BenchError(
+                f"Per-slot context is {args.ctx_size // args.parallel:,}; the profile requires "
+                f"at least {required:,}. Remove --ctx-size and --parallel to use GPU-aware "
+                f"defaults, or set --ctx-size to at least {minimum_total:,} for "
+                f"--parallel {args.parallel}.")
         public_endpoint = "managed local llama.cpp endpoint"
     else:
         if not args.model_name:
@@ -495,6 +526,9 @@ def run(args: argparse.Namespace) -> int:
             "endpoint": public_endpoint,
             "cases": [{"id": case["id"], "planned_samples": case["planned_samples"],
                        "generation": case["resolved_generation"]} for case in profile["cases"]]}
+    if args.gguf:
+        plan["server"] = {"parallel": args.parallel, "ctx_size": args.ctx_size,
+                          "slot_context": args.ctx_size // args.parallel}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
@@ -515,9 +549,6 @@ def run(args: argparse.Namespace) -> int:
     (run_dir / "profile.json").write_text(args.profile.read_text(encoding="utf-8"), encoding="utf-8")
     backend: dict[str, Any]
     if args.gguf:
-        binary = shutil.which(args.llama_server)
-        if not binary:
-            raise report.BenchError(f"llama-server was not found: {args.llama_server}")
         server_identity = llama_server_identity(binary)
         backend = {"type": "gguf", "model": model,
                    "gguf": gguf_inventory(args.gguf),
