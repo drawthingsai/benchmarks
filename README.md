@@ -115,3 +115,59 @@ The URL is the OpenAI-compatible API endpoint. `--model-name` is the API model i
 The bundled GPQA Diamond, AIME 2026, IFEval, BFCL, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
 
 Results are stored under `runs/<run-id>/`. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
+
+## Reproduce the community baselines
+
+The commands below download the pinned community GGUF revisions used by this comparison and evaluate every model with the same profile. Models are stored under `$HOME/models`; change that path if needed. The runner selects a safe concurrency level from the available GPU memory, or you can override it with `--parallel`.
+
+```bash
+# Unsloth
+hf download unsloth/Qwen3.8-27B-GGUF \
+    Qwen3.8-27B-UD-Q2_K_XL.gguf Qwen3.8-27B-UD-IQ2_S.gguf \
+    --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
+    --local-dir "$HOME/models/unsloth/Qwen3.8-27B-GGUF" \
+    --max-workers 8
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q2_K_XL.gguf" \
+  --model-name UD-Q2_K_XL \
+  --run-id UD-Q2_K_XL
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ2_S.gguf" \
+  --model-name UD-IQ2_S \
+  --run-id UD-IQ2_S
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" \
+  --model-name UD-Q4_K_M \
+  --run-id UD-Q4_K_M
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf" \
+  --model-name Q4_K_M \
+  --run-id Q4_K_M
+
+# AtomicChat
+hf download AtomicChat/Qwen3.8-27B-GGUF \
+    Qwen3.8-27B-AD-IQ2_XS.gguf Qwen3.8-27B-AD-IQ1_M.gguf \
+    --revision ca10ebceb1887be9d33b838770a36b39d75a8a4c \
+    --local-dir "$HOME/models/AtomicChat/Qwen3.8-27B-GGUF" \
+    --max-workers 8
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/AtomicChat/Qwen3.8-27B-GGUF/Qwen3.8-27B-AD-IQ2_XS.gguf" \
+  --model-name AD-IQ2_XS \
+  --run-id AD-IQ2_XS
+
+python3 benchmark.py run \
+  --profile profiles/qwen3.8-thinking.json \
+  --gguf "$HOME/models/AtomicChat/Qwen3.8-27B-GGUF/Qwen3.8-27B-AD-IQ1_M.gguf" \
+  --model-name AD-IQ1_M \
+  --run-id AD-IQ1_M
+```
