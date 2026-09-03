@@ -436,7 +436,9 @@ def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
 def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url: str,
              attempt: Path, key_env: str | None, eval_batch_size: int,
              resume_cache: Path | None = None) -> int:
-    attempt.mkdir(parents=True)
+    # Resume reuses the existing case directory. The first run is still protected
+    # by the run-directory existence check before cases are created.
+    attempt.mkdir(parents=True, exist_ok=True)
     argv = evalscope_command(profile, case, model, api_url, attempt, eval_batch_size, resume_cache)
     record_path = attempt / "attempt.json"
     attempt_number = 1
