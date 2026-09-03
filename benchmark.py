@@ -406,7 +406,8 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
 
 
 def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
-                      api_url: str, attempt: Path, eval_batch_size: int) -> list[str]:
+                      api_url: str, attempt: Path, eval_batch_size: int,
+                      resume_cache: Path | None = None) -> list[str]:
     executable = shutil.which("evalscope") or "evalscope"
     settings = profile.get("evalscope", {})
     argv = [executable, "eval", "--model", model, "--api-url", api_url,
@@ -426,17 +427,38 @@ def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
         argv.extend(["--repeats", str(case["repeats"])])
     if case.get("sandbox_required"):
         argv.append("--use-sandbox")
+    if resume_cache:
+        argv.extend(["--use-cache", str(resume_cache), "--rerun-review"])
     argv.append("--collect-perf" if settings.get("collect_perf", True) else "--no-collect-perf")
     return argv
 
 
 def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url: str,
-             attempt: Path, key_env: str | None, eval_batch_size: int) -> int:
+             attempt: Path, key_env: str | None, eval_batch_size: int,
+             resume_cache: Path | None = None) -> int:
     attempt.mkdir(parents=True)
-    argv = evalscope_command(profile, case, model, api_url, attempt, eval_batch_size)
-    record = {"schema_version": 1, "case_id": case["id"], "attempt": 1,
+    argv = evalscope_command(profile, case, model, api_url, attempt, eval_batch_size, resume_cache)
+    record_path = attempt / "attempt.json"
+    attempt_number = 1
+    history: list[dict[str, Any]] = []
+    if record_path.is_file():
+        previous = report.load_json(record_path)
+        previous_number = previous.get("attempt", 1)
+        if isinstance(previous_number, int) and not isinstance(previous_number, bool):
+            attempt_number = previous_number + 1
+        previous_history = previous.get("history")
+        if isinstance(previous_history, list):
+            history.extend(item for item in previous_history if isinstance(item, dict))
+        history.append({key: previous[key] for key in (
+            "attempt", "started_at", "finished_at", "return_code", "interrupted_by", "command"
+        ) if key in previous})
+    record = {"schema_version": 1, "case_id": case["id"], "attempt": attempt_number,
               "started_at": report.utc_now(), "command": argv}
-    report.write_json(attempt / "attempt.json", record)
+    if history:
+        record["history"] = history
+    if resume_cache:
+        record["resumed_from"] = str(resume_cache)
+    report.write_json(record_path, record)
     environment = os.environ.copy()
     if key_env:
         environment.pop(key_env, None)
@@ -447,11 +469,62 @@ def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url:
         terminate_process_group(process)
         record.update({"finished_at": report.utc_now(), "return_code": process.returncode,
                        "interrupted_by": type(exc).__name__})
-        report.write_json(attempt / "attempt.json", record)
+        report.write_json(record_path, record)
         raise
     record.update({"finished_at": report.utc_now(), "return_code": code})
-    report.write_json(attempt / "attempt.json", record)
+    report.write_json(record_path, record)
     return code
+
+
+def latest_evalscope_cache(attempt: Path) -> Path | None:
+    configs = list((attempt / "evalscope").glob("*/configs/task_config.yaml"))
+    if not configs:
+        return None
+    return max(configs, key=lambda path: path.stat().st_mtime).parent.parent
+
+
+def case_completed(attempt: Path) -> bool:
+    record_path = attempt / "attempt.json"
+    return record_path.is_file() and report.load_json(record_path).get("return_code") == 0
+
+
+def resumable_profile(path: Path) -> dict[str, Any]:
+    profile = report.load_json(path)
+    settings = dict(profile.get("evalscope", {}))
+    settings.pop("eval_batch_size", None)
+    profile["evalscope"] = settings
+    return profile
+
+
+def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
+                    public_endpoint: str, profile_path: Path, version: str) -> None:
+    manifest = report.load_json(run_dir / "manifest.json")
+    recorded_profile = manifest.get("profile") if isinstance(manifest.get("profile"), dict) else {}
+    recorded_hash = recorded_profile.get("sha256")
+    original_profile = run_dir / "profile.json"
+    if recorded_hash != sha256_file(original_profile):
+        raise report.BenchError("Cannot resume: the recorded profile has been modified")
+    if resumable_profile(profile_path) != resumable_profile(original_profile):
+        raise report.BenchError("Cannot resume: the profile does not match the original run")
+    if manifest.get("evalscope_version") != version:
+        raise report.BenchError("Cannot resume: the EvalScope version does not match the original run")
+
+    backend = manifest.get("backend") if isinstance(manifest.get("backend"), dict) else {}
+    expected_type = "gguf" if args.gguf else "openai-compatible"
+    if backend.get("type") != expected_type or backend.get("model") != model:
+        raise report.BenchError("Cannot resume: the model or backend does not match the original run")
+    if args.gguf:
+        artifact = backend.get("gguf") if isinstance(backend.get("gguf"), dict) else {}
+        if artifact.get("path") != str(args.gguf.resolve()):
+            raise report.BenchError("Cannot resume: the GGUF path does not match the original run")
+    elif backend.get("url") != public_endpoint or backend.get("api_key_header") != args.api_key_header:
+        raise report.BenchError("Cannot resume: the API endpoint does not match the original run")
+
+    status = report.load_json(run_dir / "status.json")
+    if status.get("state") == "running":
+        raise report.BenchError("Cannot resume a run that is still marked as running; stop it first")
+    if status.get("state") == "finished":
+        raise report.BenchError("Cannot resume a run that has already finished")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -472,10 +545,16 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--llama-server", default="llama-server")
     run.add_argument("--ctx-size", type=int,
                      help="total server context; defaults to profile limit times resolved slots")
-    run.add_argument("--parallel", type=int,
-                     help="server slots; defaults to evaluator concurrency and visible accelerators, capped at four")
+    run.add_argument(
+        "--parallel",
+        type=int,
+        help=("evaluator concurrency; for local GGUF runs this also sets llama-server slots; "
+              "defaults to the profile setting"),
+    )
     run.add_argument("--gpu-layers", type=int, default=999)
     run.add_argument("--startup-timeout", type=int, default=300)
+    run.add_argument("--resume", action="store_true",
+                     help="resume an interrupted run with the same run ID")
     run.add_argument("--dry-run", action="store_true")
     doctor = commands.add_parser("doctor", help="probe a remote endpoint")
     doctor.add_argument("--url", required=True)
@@ -495,12 +574,17 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
-    profile = report.load_profile(args.profile.resolve())
+    profile_path = args.profile.expanduser().resolve()
+    profile = report.load_profile(profile_path)
     key = resolve_key(args.api_key_env)
+    if args.resume and not args.run_id:
+        raise report.BenchError("--resume requires --run-id")
     profile_batch_size = profile.get("evalscope", {}).get("eval_batch_size", 1)
     if (isinstance(profile_batch_size, bool) or not isinstance(profile_batch_size, int)
             or profile_batch_size <= 0):
         raise report.BenchError("profile.evalscope.eval_batch_size must be a positive integer")
+    if args.parallel is not None and args.parallel <= 0:
+        raise report.BenchError("--parallel must be positive")
     if args.gguf:
         if not args.gguf.is_file():
             raise report.BenchError(f"GGUF file does not exist: {args.gguf}")
@@ -511,8 +595,6 @@ def run(args: argparse.Namespace) -> int:
         required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
         if args.parallel is None:
             args.parallel = min(4, profile_batch_size, accelerator_count(binary))
-        if args.parallel <= 0:
-            raise report.BenchError("--parallel must be positive")
         if args.ctx_size is None:
             args.ctx_size = required * args.parallel
         if args.ctx_size <= 0 or args.parallel <= 0 or args.ctx_size % args.parallel:
@@ -531,8 +613,8 @@ def run(args: argparse.Namespace) -> int:
             raise report.BenchError("--model-name is required with --url")
         validate_url(args.url)
         model, public_endpoint = args.model_name, redact_url(args.url)
-        eval_batch_size = profile_batch_size
-    plan = {"profile": str(args.profile.resolve()), "suite": profile["suite"],
+        eval_batch_size = args.parallel if args.parallel is not None else profile_batch_size
+    plan = {"profile": str(profile_path), "suite": profile["suite"], "resume": args.resume,
             "backend": "gguf" if args.gguf else "url", "model": model,
             "endpoint": public_endpoint, "eval_batch_size": eval_batch_size,
             "cases": [{"id": case["id"], "planned_samples": case["planned_samples"],
@@ -554,28 +636,37 @@ def run(args: argparse.Namespace) -> int:
     stamp = report.utc_now().replace(":", "").replace("-", "")
     run_id = safe_name(args.run_id or f"{stamp}-{profile['suite']['id']}-{model}")
     run_dir = args.output_dir.expanduser().resolve() / run_id
-    if run_dir.exists():
-        raise report.BenchError(f"Run directory already exists: {run_dir}")
-    run_dir.mkdir(parents=True)
-    (run_dir / "profile.json").write_text(args.profile.read_text(encoding="utf-8"), encoding="utf-8")
-    backend: dict[str, Any]
-    if args.gguf:
-        server_identity = llama_server_identity(binary)
-        backend = {"type": "gguf", "model": model,
-                   "gguf": gguf_inventory(args.gguf),
-                   "llama_server": {"path": binary, "version": server_identity,
-                                    "commit": LLAMA_CPP_COMMIT},
-                   "ctx_size": args.ctx_size, "parallel": args.parallel,
-                   "slot_context": args.ctx_size // args.parallel, "gpu_layers": args.gpu_layers}
+    if args.resume:
+        if not run_dir.is_dir():
+            raise report.BenchError(f"Cannot resume: run directory does not exist: {run_dir}")
+        validate_resume(run_dir, args, model, public_endpoint, profile_path, version)
     else:
-        backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
-                   "api_key_env": args.api_key_env, "api_key_header": args.api_key_header}
-    manifest = {"schema_version": 1, "run_id": run_id, "created_at": report.utc_now(),
-                "evalscope_version": version,
-                "profile": {"file": "profile.json", "source": str(args.profile.resolve()),
-                            "sha256": sha256_file(args.profile)}, "backend": backend}
-    report.write_json(run_dir / "manifest.json", manifest)
-    report.write_json(run_dir / "status.json", {"state": "running", "updated_at": report.utc_now()})
+        if run_dir.exists():
+            raise report.BenchError(f"Run directory already exists: {run_dir}")
+        run_dir.mkdir(parents=True)
+        (run_dir / "profile.json").write_text(profile_path.read_text(encoding="utf-8"), encoding="utf-8")
+        backend: dict[str, Any]
+        if args.gguf:
+            server_identity = llama_server_identity(binary)
+            backend = {"type": "gguf", "model": model,
+                       "gguf": gguf_inventory(args.gguf),
+                       "llama_server": {"path": binary, "version": server_identity,
+                                        "commit": LLAMA_CPP_COMMIT},
+                       "ctx_size": args.ctx_size, "parallel": args.parallel,
+                       "slot_context": args.ctx_size // args.parallel, "gpu_layers": args.gpu_layers}
+        else:
+            backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
+                       "api_key_env": args.api_key_env, "api_key_header": args.api_key_header,
+                       "eval_batch_size": eval_batch_size}
+        manifest = {"schema_version": 1, "run_id": run_id, "created_at": report.utc_now(),
+                    "evalscope_version": version,
+                    "profile": {"file": "profile.json", "source": str(profile_path),
+                                "sha256": sha256_file(profile_path)}, "backend": backend}
+        report.write_json(run_dir / "manifest.json", manifest)
+    report.write_json(run_dir / "status.json", {
+        "state": "running", "resumed": args.resume, "pid": os.getpid(),
+        "updated_at": report.utc_now(),
+    })
     service = LlamaServer(args, model, run_dir / "llama-server.log") if args.gguf else nullcontext()
     try:
         with service as local:
@@ -585,9 +676,12 @@ def run(args: argparse.Namespace) -> int:
             with proxy_context as proxy:
                 child_url = endpoint if args.gguf else proxy.url
                 for case in profile["cases"]:
+                    attempt = run_dir / "cases" / case["id"] / "attempt-0001"
+                    if args.resume and case_completed(attempt):
+                        continue
+                    resume_cache = latest_evalscope_cache(attempt) if args.resume else None
                     run_case(profile, case, model, child_url,
-                             run_dir / "cases" / case["id"] / "attempt-0001",
-                             args.api_key_env, eval_batch_size)
+                             attempt, args.api_key_env, eval_batch_size, resume_cache)
         summary = report.summarize_run(run_dir)
         report.write_reports(run_dir, summary)
         report.write_json(run_dir / "status.json", {"state": "finished", "result": summary["status"],

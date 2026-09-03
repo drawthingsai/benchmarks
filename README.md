@@ -114,7 +114,7 @@ The URL is the OpenAI-compatible API endpoint. `--model-name` is the API model i
 
 The bundled GPQA Diamond, AIME 2026, IFEval, BFCL, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
 
-Results are stored under `runs/<run-id>/`. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
+Results are stored under `runs/<run-id>/`. After an interrupted run, repeat the same command with `--resume`; completed benchmarks and cached samples are reused. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
 
 ## Reproduce the community baselines
 
