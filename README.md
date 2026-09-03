@@ -13,7 +13,7 @@ cd benchmarks
 conda create -n benchmarks python=3.12
 conda activate benchmarks
 
-python3 -m pip install 'evalscope[bfcl]==1.11.0'
+python3 -m pip install 'evalscope[bfcl,ifeval]==1.11.0' 'soundfile==0.13.1'
 ```
 
 For local GGUF runs, use llama.cpp commit `0df974d777c904dda1da3b00faa7769c6310ae74` (`llama.cpp 0.3.0-dev`, build `474`). Build `llama-server` from that exact revision and place `llama.cpp/build/bin` on `PATH`:
@@ -68,17 +68,20 @@ The command above starts llama-server with these effective arguments:
 --alias MODEL
 --host 127.0.0.1
 --port AUTO_ASSIGNED
---ctx-size PROFILE_LIMIT_TIMES_SLOTS
---parallel AUTO_SLOTS
+--ctx-size PROFILE_LIMIT_TIMES_SLOTS_PER_SERVER
+--parallel SLOTS_PER_SERVER
+--device ONE_ACCELERATOR_PER_SERVER
+--split-mode none
 --n-gpu-layers 999
 --cache-type-k f16
 --cache-type-v f16
+--cache-prompt
 --jinja
 --no-context-shift
 --no-webui
 ```
 
-For local GGUF runs, EvalScope concurrency always matches the resolved llama-server slot count: `--parallel 4` automatically uses `eval_batch_size=4`. Total context grows by the same factor so every slot retains the full profile context limit. The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
+For local GGUF runs, `--parallel N` sets total EvalScope concurrency. The runner starts one complete model copy per visible accelerator, capped at `N`, and distributes new conversations round-robin. Later turns with the same system and first conversation message return to the same server so llama.cpp can reuse its prompt cache. Each server is pinned to one accelerator with `--split-mode none`; a model is never split across accelerators. Restrict the devices with `CUDA_VISIBLE_DEVICES`. Context is sized per server so every slot retains the full profile limit. The KV cache uses F16 for both K and V.
 
 ## Compare results
 
@@ -118,7 +121,7 @@ Results are stored under `runs/<run-id>/`. After an interrupted run, repeat the 
 
 ## Reproduce the community baselines
 
-The commands below download the pinned community GGUF revisions used by this comparison and evaluate every model with the same profile. Models are stored under `$HOME/models`; change that path if needed. The runner selects a safe concurrency level from the available GPU memory, or you can override it with `--parallel`.
+The commands below download the pinned community GGUF revisions used by this comparison and evaluate every model with the same profile. Models are stored under `$HOME/models`; change that path if needed. The profile supplies the default concurrency, or you can override it with `--parallel`.
 
 ```bash
 # Unsloth

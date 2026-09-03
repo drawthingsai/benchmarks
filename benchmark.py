@@ -21,16 +21,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import report
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILE = ROOT / "profiles" / "smoke.json"
 LLAMA_CPP_COMMIT = "0df974d777c904dda1da3b00faa7769c6310ae74"
+BFCL_EVAL_VERSION = "2025.10.27.1"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
 GGUF_SCALARS = {
@@ -137,17 +138,16 @@ def llama_server_identity(binary: str) -> str:
     return identity
 
 
-def accelerator_count(binary: str) -> int:
-    """Count accelerators visible to llama.cpp, falling back to CPU-only execution."""
+def accelerator_devices(binary: str) -> list[str]:
+    """Return accelerator names reported by llama.cpp."""
     try:
         result = subprocess.run([binary, "--list-devices"], capture_output=True, text=True,
                                 timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        return 1
+        return []
     if result.returncode:
-        return 1
-    devices = re.findall(r"^\s+\S+\d+:\s", f"{result.stdout}\n{result.stderr}", re.MULTILINE)
-    return max(1, len(devices))
+        return []
+    return re.findall(r"^\s+(\S+):\s", f"{result.stdout}\n{result.stderr}", re.MULTILINE)
 
 
 def terminate_process_group(process: subprocess.Popen[Any], grace_seconds: float = 10) -> None:
@@ -223,6 +223,38 @@ def resolve_key(name: str | None) -> str | None:
     return value
 
 
+def validate_runtime_dependencies(profile: dict[str, Any]) -> None:
+    """Fail before inference when an optional benchmark dependency is unusable."""
+    if not any(case.get("dataset") == "bfcl_v4" for case in profile["cases"]):
+        return
+
+    install = (
+        "python3 -m pip install 'evalscope[bfcl,ifeval]==1.11.0' "
+        "'soundfile==0.13.1'"
+    )
+    try:
+        version = importlib.metadata.version("bfcl-eval")
+    except importlib.metadata.PackageNotFoundError:
+        raise report.BenchError(
+            f"BFCL dependencies are missing; run: {install}"
+        ) from None
+
+    if version != BFCL_EVAL_VERSION:
+        raise report.BenchError(
+            f"BFCL requires bfcl-eval {BFCL_EVAL_VERSION}, found {version}; "
+            f"run: {install}"
+        )
+
+    try:
+        from bfcl_eval.eval_checker.eval_runner import (  # noqa: F401
+            _evaluate_single_agentic_entry,
+        )
+    except ImportError as exc:
+        raise report.BenchError(
+            f"BFCL dependencies are unusable ({exc}); run: {install}"
+        ) from None
+
+
 def request(base_url: str, path: str, *, key: str | None = None,
             key_header: str = "Authorization", key_prefix: str = "Bearer ",
             method: str = "GET", body: dict[str, Any] | None = None,
@@ -271,22 +303,73 @@ def probe(base_url: str, *, key: str | None = None, key_header: str = "Authoriza
     return result
 
 
-class AuthProxy(AbstractContextManager["AuthProxy"]):
-    """Forward requests while keeping the real credential out of child processes."""
+class EndpointProxy(AbstractContextManager["EndpointProxy"]):
+    """Forward requests with round-robin and multi-turn conversation affinity."""
 
-    def __init__(self, target_url: str, key: str | None, header: str, prefix: str) -> None:
-        self.target = validate_url(target_url)
+    def __init__(self, target_urls: str | list[str], key: str | None,
+                 header: str, prefix: str) -> None:
+        urls = [target_urls] if isinstance(target_urls, str) else target_urls
+        self.targets = [validate_url(url) for url in urls]
         self.key, self.header, self.prefix = key, header, prefix
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
+        self.target_index = 0
+        self.target_lock = threading.Lock()
+        self.prefix_targets: dict[str, int] = {}
 
     @property
     def url(self) -> str:
         if not self.server:
             raise RuntimeError("Authentication proxy has not started")
-        return f"http://127.0.0.1:{self.server.server_address[1]}{self.target.path.rstrip('/')}"
+        path = self.targets[0].path.rstrip("/")
+        return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
 
-    def __enter__(self) -> "AuthProxy":
+    @staticmethod
+    def routing_prefix(body: bytes | None) -> str | None:
+        """Hash the stable beginning of an OpenAI chat conversation."""
+        if not body:
+            return None
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
+            return None
+
+        prefix = []
+        has_conversation_message = False
+        for message in payload["messages"]:
+            if not isinstance(message, dict):
+                return None
+            prefix.append(message)
+            if message.get("role") not in {"system", "developer"}:
+                has_conversation_message = True
+                break
+        if not has_conversation_message:
+            return None
+
+        identity = {
+            "model": payload.get("model"),
+            "tools": payload.get("tools"),
+            "tool_choice": payload.get("tool_choice"),
+            "messages": prefix,
+        }
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False).encode()
+        return hashlib.sha256(canonical).hexdigest()
+
+    def next_target(self, body: bytes | None = None) -> urllib.parse.SplitResult:
+        prefix = self.routing_prefix(body)
+        with self.target_lock:
+            index = self.prefix_targets.get(prefix) if prefix else None
+            if index is None:
+                index = self.target_index
+                self.target_index = (self.target_index + 1) % len(self.targets)
+                if prefix:
+                    self.prefix_targets[prefix] = index
+            return self.targets[index]
+
+    def __enter__(self) -> "EndpointProxy":
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -304,6 +387,7 @@ class AuthProxy(AbstractContextManager["AuthProxy"]):
             def forward(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length) if length else None
+                target = owner.next_target(body)
                 excluded = HOP_HEADERS | {"host", "content-length", "authorization",
                                           "proxy-authorization", owner.header.lower()}
                 headers = {key: value for key, value in self.headers.items()
@@ -311,14 +395,14 @@ class AuthProxy(AbstractContextManager["AuthProxy"]):
                 if owner.key:
                     headers[owner.header] = f"{owner.prefix}{owner.key}"
                 incoming = urllib.parse.urlsplit(self.path)
-                base = owner.target.path.rstrip("/")
+                base = target.path.rstrip("/")
                 suffix = incoming.path[len(base):] if base and incoming.path.startswith(base) else incoming.path
                 query = urllib.parse.urlencode(
-                    urllib.parse.parse_qsl(owner.target.query, keep_blank_values=True)
+                    urllib.parse.parse_qsl(target.query, keep_blank_values=True)
                     + urllib.parse.parse_qsl(incoming.query, keep_blank_values=True))
                 path = f"{base}/{suffix.lstrip('/')}" + (f"?{query}" if query else "")
-                cls = http.client.HTTPSConnection if owner.target.scheme == "https" else http.client.HTTPConnection
-                connection = cls(owner.target.hostname, owner.target.port, timeout=3600)
+                cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
+                connection = cls(target.hostname, target.port, timeout=3600)
                 try:
                     connection.request(self.command, path, body=body, headers=headers)
                     upstream = connection.getresponse()
@@ -348,10 +432,12 @@ class AuthProxy(AbstractContextManager["AuthProxy"]):
 
 
 class LlamaServer(AbstractContextManager["LlamaServer"]):
-    """Manage one loopback-only llama.cpp server for a complete suite."""
+    """Manage one loopback-only llama.cpp server."""
 
-    def __init__(self, args: argparse.Namespace, model: str, log: Path) -> None:
+    def __init__(self, args: argparse.Namespace, model: str, log: Path,
+                 device: str | None = None) -> None:
         self.args, self.model, self.log = args, model, log
+        self.device = device
         self.process: subprocess.Popen[bytes] | None = None
         self.handle = None
         self.port = 0
@@ -374,10 +460,14 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
                     self.port = int(sock.getsockname()[1])
                 argv = [binary, "--model", str(self.args.gguf.resolve()), "--alias", self.model,
                         "--host", "127.0.0.1", "--port", str(self.port),
-                        "--ctx-size", str(self.args.ctx_size), "--parallel", str(self.args.parallel),
+                        "--ctx-size", str(self.args.ctx_size),
+                        "--parallel", str(self.args.slots_per_server),
                         "--n-gpu-layers", str(self.args.gpu_layers),
+                        "--split-mode", "none",
                         "--cache-type-k", "f16", "--cache-type-v", "f16",
-                        "--jinja", "--no-context-shift", "--no-webui"]
+                        "--cache-prompt", "--jinja", "--no-context-shift", "--no-webui"]
+                if self.device:
+                    argv.extend(["--device", self.device])
                 self.process = subprocess.Popen(argv, stdout=self.handle, stderr=subprocess.STDOUT,
                                                 start_new_session=True)
                 deadline = time.monotonic() + self.args.startup_timeout
@@ -403,6 +493,23 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
             terminate_process_group(self.process, grace_seconds=15)
         if self.handle:
             self.handle.close()
+
+
+@contextmanager
+def llama_servers(args: argparse.Namespace, model: str, run_dir: Path) -> Iterator[str]:
+    """Start one complete model copy on each selected accelerator."""
+    with ExitStack() as stack:
+        urls = []
+        for device in args.server_devices:
+            log_name = ("llama-server.log" if len(args.server_devices) == 1
+                        else f"llama-server-{device}.log")
+            server = stack.enter_context(LlamaServer(args, model, run_dir / log_name, device))
+            urls.append(server.url)
+        if len(urls) == 1:
+            yield urls[0]
+        else:
+            proxy = stack.enter_context(EndpointProxy(urls, None, "Authorization", "Bearer "))
+            yield proxy.url
 
 
 def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
@@ -525,8 +632,8 @@ def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
     status = report.load_json(run_dir / "status.json")
     if status.get("state") == "running":
         raise report.BenchError("Cannot resume a run that is still marked as running; stop it first")
-    if status.get("state") == "finished":
-        raise report.BenchError("Cannot resume a run that has already finished")
+    if status.get("state") == "finished" and status.get("result") != "failed":
+        raise report.BenchError("Cannot resume a run that has already completed successfully")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -546,12 +653,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id")
     run.add_argument("--llama-server", default="llama-server")
     run.add_argument("--ctx-size", type=int,
-                     help="total server context; defaults to profile limit times resolved slots")
+                     help="context per server; defaults to profile limit times its slots")
     run.add_argument(
         "--parallel",
         type=int,
-        help=("evaluator concurrency; for local GGUF runs this also sets llama-server slots; "
-              "defaults to the profile setting"),
+        help=("total evaluator concurrency, distributed across local servers; defaults to the "
+              "profile setting"),
     )
     run.add_argument("--gpu-layers", type=int, default=999)
     run.add_argument("--startup-timeout", type=int, default=300)
@@ -595,19 +702,24 @@ def run(args: argparse.Namespace) -> int:
             raise report.BenchError(f"llama-server was not found: {args.llama_server}")
         model = args.model_name or args.gguf.name
         required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
+        devices = accelerator_devices(binary)
         if args.parallel is None:
-            args.parallel = min(4, profile_batch_size, accelerator_count(binary))
+            args.parallel = min(4, profile_batch_size, max(1, len(devices)))
+        args.server_devices = devices[:args.parallel] or [None]
+        args.slots_per_server = (
+            args.parallel + len(args.server_devices) - 1) // len(args.server_devices)
         if args.ctx_size is None:
-            args.ctx_size = required * args.parallel
-        if args.ctx_size <= 0 or args.parallel <= 0 or args.ctx_size % args.parallel:
-            raise report.BenchError("--ctx-size must be positive and divisible by --parallel")
-        if args.ctx_size // args.parallel < required:
-            minimum_total = required * args.parallel
+            args.ctx_size = required * args.slots_per_server
+        if args.ctx_size <= 0 or args.ctx_size % args.slots_per_server:
             raise report.BenchError(
-                f"Per-slot context is {args.ctx_size // args.parallel:,}; the profile requires "
-                f"at least {required:,}. Remove --ctx-size and --parallel to use GPU-aware "
-                f"defaults, or set --ctx-size to at least {minimum_total:,} for "
-                f"--parallel {args.parallel}.")
+                "--ctx-size must be positive and divisible by the slots per server")
+        if args.ctx_size // args.slots_per_server < required:
+            minimum_total = required * args.slots_per_server
+            raise report.BenchError(
+                f"Per-slot context is {args.ctx_size // args.slots_per_server:,}; the profile "
+                f"requires at least {required:,}. Remove --ctx-size to use the resolved default, "
+                f"or set --ctx-size to at least {minimum_total:,} for "
+                f"{args.slots_per_server} slots per server.")
         eval_batch_size = args.parallel
         public_endpoint = "managed local llama.cpp endpoint"
     else:
@@ -622,8 +734,11 @@ def run(args: argparse.Namespace) -> int:
             "cases": [{"id": case["id"], "planned_samples": case["planned_samples"],
                        "generation": case["resolved_generation"]} for case in profile["cases"]]}
     if args.gguf:
-        plan["server"] = {"parallel": args.parallel, "ctx_size": args.ctx_size,
-                          "slot_context": args.ctx_size // args.parallel}
+        plan["server"] = {"total_parallel": args.parallel,
+                          "devices": args.server_devices,
+                          "slots_per_server": args.slots_per_server,
+                          "ctx_size_per_server": args.ctx_size,
+                          "slot_context": args.ctx_size // args.slots_per_server}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
@@ -635,6 +750,7 @@ def run(args: argparse.Namespace) -> int:
         ) from None
     if version != "1.11.0":
         raise report.BenchError(f"EvalScope 1.11.0 is required, found {version}")
+    validate_runtime_dependencies(profile)
     stamp = report.utc_now().replace(":", "").replace("-", "")
     run_id = safe_name(args.run_id or f"{stamp}-{profile['suite']['id']}-{model}")
     run_dir = args.output_dir.expanduser().resolve() / run_id
@@ -654,8 +770,11 @@ def run(args: argparse.Namespace) -> int:
                        "gguf": gguf_inventory(args.gguf),
                        "llama_server": {"path": binary, "version": server_identity,
                                         "commit": LLAMA_CPP_COMMIT},
-                       "ctx_size": args.ctx_size, "parallel": args.parallel,
-                       "slot_context": args.ctx_size // args.parallel, "gpu_layers": args.gpu_layers}
+                       "ctx_size_per_server": args.ctx_size, "parallel": args.parallel,
+                       "devices": args.server_devices,
+                       "slots_per_server": args.slots_per_server,
+                       "slot_context": args.ctx_size // args.slots_per_server,
+                       "gpu_layers": args.gpu_layers}
         else:
             backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
                        "api_key_env": args.api_key_env, "api_key_header": args.api_key_header,
@@ -669,11 +788,10 @@ def run(args: argparse.Namespace) -> int:
         "state": "running", "resumed": args.resume, "pid": os.getpid(),
         "updated_at": report.utc_now(),
     })
-    service = LlamaServer(args, model, run_dir / "llama-server.log") if args.gguf else nullcontext()
+    service = llama_servers(args, model, run_dir) if args.gguf else nullcontext(args.url)
     try:
-        with service as local:
-            endpoint = local.url if args.gguf else args.url
-            proxy_context = nullcontext() if args.gguf else AuthProxy(
+        with service as endpoint:
+            proxy_context = nullcontext() if args.gguf else EndpointProxy(
                 endpoint, key, args.api_key_header, args.api_key_prefix)
             with proxy_context as proxy:
                 child_url = endpoint if args.gguf else proxy.url
