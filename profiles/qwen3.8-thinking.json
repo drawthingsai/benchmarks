@@ -3,7 +3,7 @@
   "suite": {
     "id": "qwen3.8-thinking-v1",
     "title": "Qwen3.8 reasoning and instruction suite",
-    "description": "A reproducible public profile using Qwen3.8 official thinking-mode sampling and a fixed medium reasoning effort."
+    "description": "A reproducible public profile using Qwen3.8 official thinking-mode sampling and the default xhigh reasoning effort."
   },
   "generation": {
     "temperature": 1.0,
@@ -15,7 +15,7 @@
       "min_p": 0.0,
       "presence_penalty": 0.0,
       "repeat_penalty": 1.0,
-      "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "medium"}
+      "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"}
     }
   },
   "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "modelscope", "collect_perf": true},
@@ -28,7 +28,7 @@
     },
     {
       "id": "aime-2024", "dataset": "aime24", "expected_samples": 30,
-      "dataset_args": {"eval_split": "train", "shuffle": false},
+      "dataset_args": {"eval_split": "test", "shuffle": false},
       "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
       "prompt_headroom": 8192
     },

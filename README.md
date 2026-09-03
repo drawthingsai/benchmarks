@@ -12,6 +12,16 @@ cd benchmarks
 python3 -m pip install evalscope==1.11.0
 ```
 
+## Datasets
+
+| Profile | Dataset | EvalScope ID | Split | Dataset rows | Evaluated rows | Primary metric |
+|---|---|---|---|---:|---:|---|
+| Smoke | GSM8K | `gsm8k` | `test` | 1,319 | 5 | `mean_acc` |
+| Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | `train` | 198 | 198 | `mean_acc` |
+| Qwen3.8 thinking | AIME 2024 | `aime24` | `test` | 30 | 30 | `mean_acc` |
+| Qwen3.8 thinking | AIME 2025 | `aime25` | `test` | 30 | 30 | `mean_acc` |
+| Qwen3.8 thinking | IFEval | `ifeval` | `train` | 541 | 541 | `mean_prompt_level_strict` |
+
 ## Run a GGUF
 
 The default command runs a five-sample GSM8K smoke test:

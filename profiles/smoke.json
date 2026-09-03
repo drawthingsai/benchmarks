@@ -13,7 +13,7 @@
       "dataset": "gsm8k",
       "expected_samples": 5,
       "limit": 5,
-      "dataset_args": {"shuffle": true},
+      "dataset_args": {"eval_split": "test", "shuffle": true},
       "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"},
       "prompt_headroom": 4096
     }
