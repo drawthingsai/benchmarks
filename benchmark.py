@@ -406,7 +406,7 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
 
 
 def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
-                      api_url: str, attempt: Path) -> list[str]:
+                      api_url: str, attempt: Path, eval_batch_size: int) -> list[str]:
     executable = shutil.which("evalscope") or "evalscope"
     settings = profile.get("evalscope", {})
     argv = [executable, "eval", "--model", model, "--api-url", api_url,
@@ -415,7 +415,7 @@ def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
             "--dataset-hub", str(settings.get("dataset_hub", "modelscope")),
             "--dataset-args", json.dumps({case["dataset"]: case["dataset_args"]}, separators=(",", ":")),
             "--seed", str(settings.get("seed", 42)),
-            "--eval-batch-size", str(settings.get("eval_batch_size", 1)),
+            "--eval-batch-size", str(eval_batch_size),
             "--generation-config", json.dumps(case["resolved_generation"], separators=(",", ":")),
             "--work-dir", str(attempt / "evalscope"), "--enable-progress-tracker"]
     if settings.get("dataset_dir"):
@@ -431,35 +431,24 @@ def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
 
 
 def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url: str,
-             attempt: Path, key_env: str | None) -> int:
+             attempt: Path, key_env: str | None, eval_batch_size: int) -> int:
     attempt.mkdir(parents=True)
-    argv = evalscope_command(profile, case, model, api_url, attempt)
+    argv = evalscope_command(profile, case, model, api_url, attempt, eval_batch_size)
     record = {"schema_version": 1, "case_id": case["id"], "attempt": 1,
               "started_at": report.utc_now(), "command": argv}
     report.write_json(attempt / "attempt.json", record)
     environment = os.environ.copy()
     if key_env:
         environment.pop(key_env, None)
-    with (attempt / "evaluator.log").open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(argv, cwd="/tmp", env=environment, text=True,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
-        try:
-            assert process.stdout is not None
-            for line in process.stdout:
-                log.write(line)
-                log.flush()
-                print(f"[{case['id']}] {line}", end="")
-            code = process.wait()
-        except BaseException as exc:
-            terminate_process_group(process)
-            record.update({"finished_at": report.utc_now(), "return_code": process.returncode,
-                           "interrupted_by": type(exc).__name__})
-            report.write_json(attempt / "attempt.json", record)
-            raise
-        finally:
-            if process.stdout:
-                process.stdout.close()
+    process = subprocess.Popen(argv, cwd="/tmp", env=environment, start_new_session=True)
+    try:
+        code = process.wait()
+    except BaseException as exc:
+        terminate_process_group(process)
+        record.update({"finished_at": report.utc_now(), "return_code": process.returncode,
+                       "interrupted_by": type(exc).__name__})
+        report.write_json(attempt / "attempt.json", record)
+        raise
     record.update({"finished_at": report.utc_now(), "return_code": code})
     report.write_json(attempt / "attempt.json", record)
     return code
@@ -508,6 +497,10 @@ def parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> int:
     profile = report.load_profile(args.profile.resolve())
     key = resolve_key(args.api_key_env)
+    profile_batch_size = profile.get("evalscope", {}).get("eval_batch_size", 1)
+    if (isinstance(profile_batch_size, bool) or not isinstance(profile_batch_size, int)
+            or profile_batch_size <= 0):
+        raise report.BenchError("profile.evalscope.eval_batch_size must be a positive integer")
     if args.gguf:
         if not args.gguf.is_file():
             raise report.BenchError(f"GGUF file does not exist: {args.gguf}")
@@ -517,10 +510,7 @@ def run(args: argparse.Namespace) -> int:
         model = args.model_name or args.gguf.name
         required = max(case["resolved_generation"]["max_tokens"] for case in profile["cases"])
         if args.parallel is None:
-            batch_size = profile.get("evalscope", {}).get("eval_batch_size", 1)
-            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
-                raise report.BenchError("profile.evalscope.eval_batch_size must be a positive integer")
-            args.parallel = min(4, batch_size, accelerator_count(binary))
+            args.parallel = min(4, profile_batch_size, accelerator_count(binary))
         if args.parallel <= 0:
             raise report.BenchError("--parallel must be positive")
         if args.ctx_size is None:
@@ -534,15 +524,17 @@ def run(args: argparse.Namespace) -> int:
                 f"at least {required:,}. Remove --ctx-size and --parallel to use GPU-aware "
                 f"defaults, or set --ctx-size to at least {minimum_total:,} for "
                 f"--parallel {args.parallel}.")
+        eval_batch_size = args.parallel
         public_endpoint = "managed local llama.cpp endpoint"
     else:
         if not args.model_name:
             raise report.BenchError("--model-name is required with --url")
         validate_url(args.url)
         model, public_endpoint = args.model_name, redact_url(args.url)
+        eval_batch_size = profile_batch_size
     plan = {"profile": str(args.profile.resolve()), "suite": profile["suite"],
             "backend": "gguf" if args.gguf else "url", "model": model,
-            "endpoint": public_endpoint,
+            "endpoint": public_endpoint, "eval_batch_size": eval_batch_size,
             "cases": [{"id": case["id"], "planned_samples": case["planned_samples"],
                        "generation": case["resolved_generation"]} for case in profile["cases"]]}
     if args.gguf:
@@ -595,7 +587,7 @@ def run(args: argparse.Namespace) -> int:
                 for case in profile["cases"]:
                     run_case(profile, case, model, child_url,
                              run_dir / "cases" / case["id"] / "attempt-0001",
-                             args.api_key_env)
+                             args.api_key_env, eval_batch_size)
         summary = report.summarize_run(run_dir)
         report.write_reports(run_dir, summary)
         report.write_json(run_dir / "status.json", {"state": "finished", "result": summary["status"],

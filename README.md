@@ -78,7 +78,7 @@ The command above starts llama-server with these effective arguments:
 --no-webui
 ```
 
-The runner matches the slot count to EvalScope's concurrent batch size and the accelerators visible to llama.cpp, capped at four. The bundled profiles use one concurrent request, so this profile defaults to `--parallel 1 --ctx-size 262144` on every GPU configuration. Override `--parallel` only when the evaluator sends concurrent requests; total context grows by the same factor. The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
+For local GGUF runs, EvalScope concurrency always matches the resolved llama-server slot count: `--parallel 4` automatically uses `eval_batch_size=4`. Total context grows by the same factor so every slot retains the full profile context limit. The KV cache uses F16 for both K and V. The loopback address and automatically selected port keep the service private and avoid port collisions. `--no-context-shift` prevents generation from discarding the beginning of a benchmark prompt. Other settings use the defaults from the pinned llama.cpp revision.
 
 ## Compare results
 
