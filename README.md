@@ -37,6 +37,8 @@ export PATH="$PWD/llama.cpp/build/bin:$PATH"
 
 BFCL v4 Quick evaluates 10 fixed categories with 20 examples each. It excludes memory and Web Search tasks, so no SerpAPI key is needed.
 
+Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
+
 ## Run a GGUF
 
 The default command runs a five-sample GSM8K smoke test:

@@ -18,21 +18,24 @@
       "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"}
     }
   },
-  "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "modelscope", "collect_perf": true},
+  "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "huggingface", "collect_perf": true},
   "cases": [
     {
-      "id": "gpqa-diamond", "dataset": "gpqa_diamond", "expected_samples": 198,
-      "dataset_args": {"eval_split": "train", "shuffle": false},
+      "id": "aime-2026", "dataset": "aime26", "expected_samples": 30,
+      "dataset_args": {"dataset_id": "math-ai/aime26", "eval_split": "test", "shuffle": false},
       "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
     },
     {
-      "id": "aime-2026", "dataset": "aime26", "expected_samples": 30,
-      "dataset_args": {"eval_split": "test", "shuffle": false},
+      "id": "gpqa-diamond", "dataset": "gpqa_diamond", "expected_samples": 198,
+      "dataset_args": {
+        "dataset_id": "Idavidrein/gpqa", "subset_list": ["gpqa_diamond"],
+        "eval_split": "train", "shuffle": false
+      },
       "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
     },
     {
       "id": "ifeval", "dataset": "ifeval", "expected_samples": 541,
-      "dataset_args": {"eval_split": "train", "shuffle": false},
+      "dataset_args": {"dataset_id": "google/IFEval", "eval_split": "train", "shuffle": false},
       "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
     },
     {
@@ -44,7 +47,6 @@
         ],
         "extra_params": {"is_fc_model": true}
       },
-      "generation": {"max_tokens": 10000},
       "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
     }
   ]

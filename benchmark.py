@@ -150,6 +150,42 @@ def accelerator_count(binary: str) -> int:
     return max(1, len(devices))
 
 
+def terminate_process_group(process: subprocess.Popen[Any], grace_seconds: float = 10) -> None:
+    """Stop a child session and every process it spawned."""
+    pgid = process.pid
+    previous_sigint: Any = None
+    protect_cleanup = threading.current_thread() is threading.main_thread()
+    if protect_cleanup:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            process.poll()
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        if protect_cleanup:
+            signal.signal(signal.SIGINT, previous_sigint)
+
+
 def safe_name(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
     return normalized[:80] or "run"
@@ -330,49 +366,41 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
             raise report.BenchError(f"llama-server was not found: {self.args.llama_server}")
         self.log.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.log.open("ab")
-        error = "startup timeout"
-        for attempt in range(1, 4):
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                self.port = int(sock.getsockname()[1])
-            argv = [binary, "--model", str(self.args.gguf.resolve()), "--alias", self.model,
-                    "--host", "127.0.0.1", "--port", str(self.port),
-                    "--ctx-size", str(self.args.ctx_size), "--parallel", str(self.args.parallel),
-                    "--n-gpu-layers", str(self.args.gpu_layers),
-                    "--cache-type-k", "f16", "--cache-type-v", "f16",
-                    "--jinja", "--no-context-shift", "--no-webui"]
-            self.process = subprocess.Popen(argv, stdout=self.handle, stderr=subprocess.STDOUT,
-                                            start_new_session=True)
-            deadline = time.monotonic() + self.args.startup_timeout
-            while time.monotonic() < deadline:
-                if self.process.poll() is not None:
-                    error = f"exit code {self.process.returncode} on attempt {attempt}/3"
+        try:
+            error = "startup timeout"
+            for attempt in range(1, 4):
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    self.port = int(sock.getsockname()[1])
+                argv = [binary, "--model", str(self.args.gguf.resolve()), "--alias", self.model,
+                        "--host", "127.0.0.1", "--port", str(self.port),
+                        "--ctx-size", str(self.args.ctx_size), "--parallel", str(self.args.parallel),
+                        "--n-gpu-layers", str(self.args.gpu_layers),
+                        "--cache-type-k", "f16", "--cache-type-v", "f16",
+                        "--jinja", "--no-context-shift", "--no-webui"]
+                self.process = subprocess.Popen(argv, stdout=self.handle, stderr=subprocess.STDOUT,
+                                                start_new_session=True)
+                deadline = time.monotonic() + self.args.startup_timeout
+                while time.monotonic() < deadline:
+                    if self.process.poll() is not None:
+                        error = f"exit code {self.process.returncode} on attempt {attempt}/3"
+                        break
+                    try:
+                        probe(self.url, model=self.model)
+                        return self
+                    except report.BenchError as exc:
+                        error = str(exc)
+                        time.sleep(1)
+                if self.process.poll() is None:
                     break
-                try:
-                    probe(self.url, model=self.model)
-                    return self
-                except report.BenchError as exc:
-                    error = str(exc)
-                    time.sleep(1)
-            if self.process.poll() is None:
-                break
-        self.__exit__()
-        raise report.BenchError(f"llama-server failed to start ({error}); see {self.log}")
+            raise report.BenchError(f"llama-server failed to start ({error}); see {self.log}")
+        except BaseException:
+            self.__exit__()
+            raise
 
     def __exit__(self, *_args: object) -> None:
-        if self.process and self.process.poll() is None:
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                self.process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.process.wait(timeout=5)
+        if self.process:
+            terminate_process_group(self.process, grace_seconds=15)
         if self.handle:
             self.handle.close()
 
@@ -424,23 +452,14 @@ def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url:
                 print(f"[{case['id']}] {line}", end="")
             code = process.wait()
         except BaseException as exc:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=5)
+            terminate_process_group(process)
             record.update({"finished_at": report.utc_now(), "return_code": process.returncode,
                            "interrupted_by": type(exc).__name__})
             report.write_json(attempt / "attempt.json", record)
             raise
+        finally:
+            if process.stdout:
+                process.stdout.close()
     record.update({"finished_at": report.utc_now(), "return_code": code})
     report.write_json(attempt / "attempt.json", record)
     return code
@@ -583,6 +602,10 @@ def run(args: argparse.Namespace) -> int:
                                                      "updated_at": report.utc_now()})
         print(f"Markdown report: {run_dir / 'report.md'}")
         return 0 if summary["status"] in {"pass", "warning"} else 1
+    except KeyboardInterrupt:
+        report.write_json(run_dir / "status.json", {"state": "interrupted",
+                                                       "updated_at": report.utc_now()})
+        raise
     except BaseException:
         report.write_json(run_dir / "status.json", {"state": "failed", "updated_at": report.utc_now()})
         raise
@@ -615,6 +638,9 @@ def main(argv: list[str] | None = None) -> int:
     except report.BenchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("\nInterrupted; evaluator and model server stopped.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
