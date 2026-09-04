@@ -161,6 +161,22 @@ def _category_name(value: Any) -> str:
     return "/".join(str(item) for item in value) if isinstance(value, list) else str(value)
 
 
+def _metric_names(metric: dict[str, Any]) -> set[str]:
+    """Return EvalScope v1 and v2 metric names plus legacy profile aliases."""
+    names = {value for value in (metric.get("name"), metric.get("legacy_name"))
+             if isinstance(value, str)}
+    identity = metric.get("identity")
+    if isinstance(identity, dict) and isinstance(identity.get("name"), str):
+        names.add(identity["name"])
+    aliases = set(names)
+    for name in names:
+        aliases.add(name.removeprefix("mean_"))
+        aliases.add(f"mean_{name}")
+        if name in {"acc", "accuracy"}:
+            aliases.update({"acc", "accuracy", "mean_acc", "mean_accuracy"})
+    return aliases
+
+
 def select_primary(reports: list[dict[str, Any]], selector: dict[str, Any],
                    default_dataset: str) -> dict[str, Any]:
     dataset = selector.get("dataset", default_dataset)
@@ -169,10 +185,16 @@ def select_primary(reports: list[dict[str, Any]], selector: dict[str, Any],
         if report.get("dataset_name") != dataset:
             continue
         for metric in report.get("metrics", []):
-            if not isinstance(metric, dict) or metric.get("name") != selector["name"]:
+            if not isinstance(metric, dict) or selector["name"] not in _metric_names(metric):
                 continue
+            identity = metric.get("identity")
+            metric_name = metric.get("name")
+            if not isinstance(metric_name, str) and isinstance(identity, dict):
+                metric_name = identity.get("name")
+            if not isinstance(metric_name, str):
+                metric_name = selector["name"]
             if selector.get("category") is None and selector.get("subset") is None:
-                matches.append({"dataset": dataset, "name": metric["name"], "category": None,
+                matches.append({"dataset": dataset, "name": metric_name, "category": None,
                                 "subset": None, "score": metric.get("score"), "num": metric.get("num"),
                                 "direction": selector.get("direction"), "scale": selector.get("scale")})
                 continue
@@ -181,14 +203,14 @@ def select_primary(reports: list[dict[str, Any]], selector: dict[str, Any],
                 if selector.get("category") is not None and name != selector["category"]:
                     continue
                 if selector.get("subset") is None:
-                    matches.append({"dataset": dataset, "name": metric["name"], "category": name,
+                    matches.append({"dataset": dataset, "name": metric_name, "category": name,
                                     "subset": None, "score": category.get("score"),
                                     "num": category.get("num"), "direction": selector.get("direction"),
                                     "scale": selector.get("scale")})
                 else:
                     for subset in category.get("subsets", []):
                         if subset.get("name") == selector["subset"]:
-                            matches.append({"dataset": dataset, "name": metric["name"],
+                            matches.append({"dataset": dataset, "name": metric_name,
                                             "category": name, "subset": selector["subset"],
                                             "score": subset.get("score"), "num": subset.get("num"),
                                             "direction": selector.get("direction"),
@@ -348,9 +370,9 @@ def _cell(value: Any) -> str:
     return str(value if value not in {None, ""} else "—").replace("|", "\\|").replace("\n", " ")
 
 
-def comparison(run_dirs: list[Path], title: str) -> str:
-    if len(run_dirs) < 2:
-        raise BenchError("A comparison requires at least two run directories")
+def comparison(run_dirs: list[Path], title: str | None = None) -> str:
+    if not run_dirs:
+        raise BenchError("At least one run directory is required")
     summaries = []
     for run_dir in run_dirs:
         summaries.append(summarize_run(run_dir))
@@ -364,7 +386,9 @@ def comparison(run_dirs: list[Path], title: str) -> str:
     if len(set(labels)) != len(labels):
         raise BenchError("Compared runs must have unique model names; set --model-name when running")
 
-    lines = [f"# {title}", "", *_result_table(summaries), ""]
+    resolved_title = title or (
+        "GGUF benchmark results" if len(summaries) == 1 else "GGUF benchmark comparison")
+    lines = [f"# {resolved_title}", "", *_result_table(summaries), ""]
     return "\n".join(lines)
 
 
@@ -373,10 +397,11 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     single = commands.add_parser("run", help="rebuild one run report")
     single.add_argument("run_dir", type=Path)
-    compare = commands.add_parser("compare", help="compare two or more completed runs")
+    compare = commands.add_parser(
+        "compare", help="summarize or compare one or more completed runs")
     compare.add_argument("run_dirs", nargs="+", type=Path)
     compare.add_argument("--output", type=Path, required=True)
-    compare.add_argument("--title", default="GGUF benchmark comparison")
+    compare.add_argument("--title")
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
@@ -389,7 +414,8 @@ def main(argv: list[str] | None = None) -> int:
             output = args.output.expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(comparison(run_dirs, args.title), encoding="utf-8")
-            print(f"Comparison written to {output}")
+            label = "Report" if len(run_dirs) == 1 else "Comparison"
+            print(f"{label} written to {output}")
         return 0
     except BenchError as exc:
         parser.error(str(exc))

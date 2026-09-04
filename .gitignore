@@ -222,3 +222,4 @@ __marimo__/
 
 run.sh
 profiles/*-2b-*.json
+outputs/

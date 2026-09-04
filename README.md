@@ -94,7 +94,7 @@ python3 benchmark.py compare \
   --output results/qwen3.8-27b.md
 ```
 
-The generated Markdown contains one comparison table. GGUF size and MTP-free size are detected from the file automatically.
+Pass one run directory to summarize it, or multiple run directories to compare them. The generated Markdown contains one result table. GGUF size and MTP-free size are detected from the file automatically.
 
 | Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v4 Quick |
 |---|---:|:---:|---:|---:|---:|---:|---:|

@@ -675,10 +675,11 @@ def parser() -> argparse.ArgumentParser:
                         help="send one minimal generation request; this may incur API charges")
     rebuild = commands.add_parser("report", help="rebuild one completed run report")
     rebuild.add_argument("run_dir", type=Path)
-    compare = commands.add_parser("compare", help="compare two or more completed runs")
+    compare = commands.add_parser(
+        "compare", help="summarize or compare one or more completed runs")
     compare.add_argument("run_dirs", nargs="+", type=Path)
     compare.add_argument("--output", type=Path, required=True)
-    compare.add_argument("--title", default="GGUF benchmark comparison")
+    compare.add_argument("--title")
     return root
 
 
@@ -839,7 +840,8 @@ def main(argv: list[str] | None = None) -> int:
             output = args.output.expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(report.comparison(run_dirs, args.title), encoding="utf-8")
-            print(f"Markdown comparison: {output}")
+            label = "report" if len(run_dirs) == 1 else "comparison"
+            print(f"Markdown {label}: {output}")
         return 0
     except report.BenchError as exc:
         print(f"error: {exc}", file=sys.stderr)
