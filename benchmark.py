@@ -605,16 +605,53 @@ def resumable_profile(path: Path) -> dict[str, Any]:
     return profile
 
 
+def profile_transition(original_path: Path, requested_path: Path) -> bool:
+    """Allow a profile to add or replace cases without invalidating reusable cases."""
+    original = resumable_profile(original_path)
+    requested = resumable_profile(requested_path)
+    if original == requested:
+        return False
+
+    original_cases = {case["id"]: case for case in original.get("cases", [])}
+    requested_cases = {case["id"]: case for case in requested.get("cases", [])}
+    shared_ids = original_cases.keys() & requested_cases.keys()
+    original_settings = {key: value for key, value in original.items()
+                         if key not in {"suite", "cases"}}
+    requested_settings = {key: value for key, value in requested.items()
+                          if key not in {"suite", "cases"}}
+    if shared_ids and original_settings != requested_settings:
+        raise report.BenchError(
+            "Cannot resume: shared cases use different generation or EvalScope settings")
+    changed = sorted(case_id for case_id in shared_ids
+                     if original_cases[case_id] != requested_cases[case_id])
+    if changed:
+        raise report.BenchError(
+            f"Cannot resume: shared case definitions changed: {', '.join(changed)}")
+    return True
+
+
+def adopt_resume_profile(run_dir: Path, profile_path: Path) -> None:
+    """Store the requested profile as the run's current reproducibility contract."""
+    stored_profile = run_dir / "profile.json"
+    report.write_json(stored_profile, report.load_json(profile_path))
+    manifest = report.load_json(run_dir / "manifest.json")
+    manifest["profile"] = {
+        "file": "profile.json",
+        "source": str(profile_path),
+        "sha256": sha256_file(stored_profile),
+    }
+    report.write_json(run_dir / "manifest.json", manifest)
+
+
 def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
-                    public_endpoint: str, profile_path: Path, version: str) -> None:
+                    public_endpoint: str, profile_path: Path, version: str) -> bool:
     manifest = report.load_json(run_dir / "manifest.json")
     recorded_profile = manifest.get("profile") if isinstance(manifest.get("profile"), dict) else {}
     recorded_hash = recorded_profile.get("sha256")
     original_profile = run_dir / "profile.json"
     if recorded_hash != sha256_file(original_profile):
         raise report.BenchError("Cannot resume: the recorded profile has been modified")
-    if resumable_profile(profile_path) != resumable_profile(original_profile):
-        raise report.BenchError("Cannot resume: the profile does not match the original run")
+    profile_changed = profile_transition(original_profile, profile_path)
     if manifest.get("evalscope_version") != version:
         raise report.BenchError("Cannot resume: the EvalScope version does not match the original run")
 
@@ -632,8 +669,15 @@ def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
     status = report.load_json(run_dir / "status.json")
     if status.get("state") == "running":
         raise report.BenchError("Cannot resume a run that is still marked as running; stop it first")
-    if status.get("state") == "finished" and status.get("result") != "failed":
+    requested = report.load_json(profile_path)
+    has_pending_case = any(
+        not case_completed(run_dir / "cases" / case["id"] / "attempt-0001")
+        for case in requested.get("cases", [])
+    )
+    if status.get("state") == "finished" and status.get("result") != "failed" \
+            and not has_pending_case:
         raise report.BenchError("Cannot resume a run that has already completed successfully")
+    return profile_changed
 
 
 def parser() -> argparse.ArgumentParser:
@@ -758,7 +802,8 @@ def run(args: argparse.Namespace) -> int:
     if args.resume:
         if not run_dir.is_dir():
             raise report.BenchError(f"Cannot resume: run directory does not exist: {run_dir}")
-        validate_resume(run_dir, args, model, public_endpoint, profile_path, version)
+        if validate_resume(run_dir, args, model, public_endpoint, profile_path, version):
+            adopt_resume_profile(run_dir, profile_path)
     else:
         if run_dir.exists():
             raise report.BenchError(f"Run directory already exists: {run_dir}")

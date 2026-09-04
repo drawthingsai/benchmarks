@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "suite": {
+    "id": "qwen3.8-thinking-bfcl-1k-v1",
+    "title": "Qwen3.8 reasoning, instruction, and function-calling suite",
+    "description": "A reproducible public profile using Qwen3.8 official thinking-mode sampling, the default xhigh reasoning effort, and a fixed 1,002-row BFCL v4 sample without Web Search."
+  },
+  "generation": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 262144,
+    "timeout": 21600,
+    "extra_body": {
+      "min_p": 0.0,
+      "presence_penalty": 0.0,
+      "repeat_penalty": 1.0,
+      "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"}
+    }
+  },
+  "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "huggingface", "collect_perf": true},
+  "cases": [
+    {
+      "id": "aime-2026", "dataset": "aime26", "expected_samples": 30,
+      "dataset_args": {"dataset_id": "math-ai/aime26", "eval_split": "test", "shuffle": false},
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "gpqa-diamond", "dataset": "gpqa_diamond", "expected_samples": 198,
+      "dataset_args": {
+        "dataset_id": "Idavidrein/gpqa", "subset_list": ["gpqa_diamond"],
+        "eval_split": "train", "shuffle": false
+      },
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "ifeval", "dataset": "ifeval", "expected_samples": 541,
+      "dataset_args": {"dataset_id": "google/IFEval", "eval_split": "train", "shuffle": false},
+      "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "bfcl-v4-1k", "dataset": "bfcl_v4", "expected_samples": 1002, "limit": 56,
+      "dataset_args": {
+        "subset_list": [
+          "simple_python", "simple_java", "simple_javascript", "multiple", "parallel",
+          "parallel_multiple", "irrelevance", "live_simple", "live_multiple", "live_parallel",
+          "live_parallel_multiple", "live_irrelevance", "live_relevance", "multi_turn_base",
+          "multi_turn_miss_func", "multi_turn_miss_param", "multi_turn_long_context",
+          "memory_kv", "memory_vector", "memory_rec_sum"
+        ],
+        "shuffle": false,
+        "extra_params": {"is_fc_model": true}
+      },
+      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
+    }
+  ]
+}

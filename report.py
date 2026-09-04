@@ -86,6 +86,17 @@ def _positive_int(value: Any, label: str, *, zero: bool = False) -> int:
     return value
 
 
+def _sample_limit(value: Any, label: str) -> int | float:
+    """Validate an EvalScope per-subset count or fractional limit."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BenchError(f"{label} must be a positive integer or a fraction in (0, 1]")
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, float) and math.isfinite(value) and 0 < value <= 1:
+        return value
+    raise BenchError(f"{label} must be a positive integer or a fraction in (0, 1]")
+
+
 def load_profile(path: Path) -> dict[str, Any]:
     profile = load_json(path)
     allowed = {"schema_version", "suite", "generation", "evalscope", "cases"}
@@ -126,7 +137,7 @@ def load_profile(path: Path) -> dict[str, Any]:
             raise BenchError(f"{label}.primary_metric.name is required")
         _positive_int(case.get("expected_samples"), f"{label}.expected_samples")
         if case.get("limit") is not None:
-            _positive_int(case["limit"], f"{label}.limit")
+            _sample_limit(case["limit"], f"{label}.limit")
         _positive_int(case.get("repeats", 1), f"{label}.repeats")
         if not isinstance(case.get("generation", {}), dict) \
                 or not isinstance(case.get("dataset_args", {}), dict):
@@ -170,11 +181,100 @@ def _metric_names(metric: dict[str, Any]) -> set[str]:
         names.add(identity["name"])
     aliases = set(names)
     for name in names:
-        aliases.add(name.removeprefix("mean_"))
-        aliases.add(f"mean_{name}")
-        if name in {"acc", "accuracy"}:
+        base_name = name.removeprefix("mean_")
+        aliases.add(base_name)
+        aliases.add(f"mean_{base_name}")
+        if base_name in {"acc", "accuracy"}:
             aliases.update({"acc", "accuracy", "mean_acc", "mean_accuracy"})
     return aliases
+
+
+def _sample_primary_score(row: dict[str, Any], selector: dict[str, Any]) -> float | None:
+    """Read the case's binary primary metric from one EvalScope review row."""
+    sample_score = row.get("sample_score")
+    if not isinstance(sample_score, dict):
+        return None
+    score = sample_score.get("score")
+    if not isinstance(score, dict) or score.get("status", "success") != "success":
+        return None
+    values = score.get("value")
+    if not isinstance(values, dict):
+        return None
+    for name in _metric_names(selector):
+        value = values.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value):
+            continue
+        return float(value)
+    return None
+
+
+def _sample_output_tokens(row: dict[str, Any]) -> int | None:
+    """Sum output tokens across every model-call usage record in one evaluated sample."""
+    messages = row.get("messages")
+    if not isinstance(messages, list):
+        return None
+    token_counts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        metrics = message.get("perf_metrics")
+        if not isinstance(metrics, dict):
+            continue
+        value = metrics.get("output_tokens")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            token_counts.append(value)
+    return sum(token_counts) if token_counts else None
+
+
+def _token_statistics(values: list[int]) -> dict[str, int | float | None]:
+    if not values:
+        return {"mean": None, "min": None, "p5": None, "p95": None, "max": None}
+    ordered = sorted(values)
+
+    def percentile(fraction: float) -> int:
+        index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
+        return ordered[index]
+
+    return {"mean": sum(ordered) / len(ordered), "min": ordered[0],
+            "p5": percentile(0.05), "p95": percentile(0.95), "max": ordered[-1]}
+
+
+def outcome_token_statistics(root: Path, selector: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate output-token lengths for correct and incorrect review rows."""
+    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for path, row in _jsonl(sorted(root.glob("**/reviews/**/*.jsonl"))):
+        sample_score = row.get("sample_score") if isinstance(row.get("sample_score"), dict) else {}
+        sample_id = sample_score.get("sample_id", row.get("index"))
+        generation_index = sample_score.get("generation_index", 0)
+        # The filename identifies a dataset subset. Keeping the last timestamp makes a rerun replace
+        # the same sample instead of counting it twice.
+        identity = (path.name, str(sample_id), str(generation_index))
+        rows[identity] = row
+
+    groups = {"correct": {"scored": 0, "tokens": []},
+              "incorrect": {"scored": 0, "tokens": []}}
+    for row in rows.values():
+        score = _sample_primary_score(row, selector)
+        if score is None:
+            continue
+        if math.isclose(score, 1.0, rel_tol=0.0, abs_tol=1e-12):
+            group = groups["correct"]
+        elif math.isclose(score, 0.0, rel_tol=0.0, abs_tol=1e-12):
+            group = groups["incorrect"]
+        else:
+            continue
+        group["scored"] += 1
+        output_tokens = _sample_output_tokens(row)
+        if output_tokens is not None:
+            group["tokens"].append(output_tokens)
+
+    result = {}
+    for name, group in groups.items():
+        token_values = group["tokens"]
+        result[name] = {"scored": group["scored"], "with_tokens": len(token_values),
+                        **_token_statistics(token_values)}
+    return result
 
 
 def select_primary(reports: list[dict[str, Any]], selector: dict[str, Any],
@@ -232,42 +332,76 @@ def _content(value: Any) -> str:
     return ""
 
 
+def _embedded_error(text: str) -> bool:
+    """Detect error envelopes that EvalScope stores as assistant text."""
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(value, dict) and "error" in value and "error_message" in value
+
+
 def prediction_health(root: Path, max_tokens: int) -> dict[str, int]:
     counts = {"prediction_rows": 0, "responded": 0, "nonempty": 0, "parsed": 0,
-              "errors": 0, "capped": 0, "unique": 0, "duplicates": 0}
+              "unparsed": 0, "errors": 0, "retries": 0, "policy_errors": 0,
+              "policy_retries": 0, "capped": 0, "unique": 0, "duplicates": 0}
     identities: list[str] = []
+    error_ids: set[str] = set()
+    policy_error_ids: set[str] = set()
     for path, row in _jsonl(sorted(root.glob("**/predictions/**/*.jsonl"))):
         counts["prediction_rows"] += 1
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         row_id = row.get("index", metadata.get("id", counts["prediction_rows"]))
+        error_id = str(metadata.get("id", row_id))
         identities.append(f"{path.relative_to(root)}:{row_id}")
         output = row.get("model_output") or {}
         if not isinstance(output, dict):
-            counts["errors"] += 1
+            error_ids.add(error_id)
             continue
         choices = output.get("choices") or []
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            counts["errors"] += 1
+            error_ids.add(error_id)
             continue
         counts["responded"] += 1
         choice = choices[0]
         message = choice.get("message") or {}
         if not isinstance(message, dict):
-            counts["errors"] += 1
+            error_ids.add(error_id)
             continue
         text = _content(message.get("content"))
         if text.strip():
             counts["nonempty"] += 1
-        error = bool(output.get("error"))
+        error = bool(output.get("error")) or _embedded_error(text)
         if error:
-            counts["errors"] += 1
+            error_ids.add(error_id)
+            error_text = json.dumps(output.get("error"), ensure_ascii=False) + text
+            if "content_policy_violation" in error_text:
+                policy_error_ids.add(error_id)
         elif text.strip() or message.get("tool_calls"):
             counts["parsed"] += 1
+        else:
+            counts["unparsed"] += 1
         usage = output.get("usage") or {}
         tokens = usage.get("output_tokens", usage.get("completion_tokens"))
         if choice.get("stop_reason") == "length" or choice.get("finish_reason") == "length" \
                 or isinstance(tokens, int) and tokens >= max_tokens:
             counts["capped"] += 1
+    for path in sorted(root.glob("**/logs/eval_log.log")):
+        try:
+            log = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        retry_messages = re.findall(r"Attempt \d+ / \d+ failed:([^\n]*)", log)
+        counts["retries"] += len(retry_messages)
+        counts["policy_retries"] += sum(
+            "content_policy_violation" in message for message in retry_messages)
+        for match in re.finditer(r"Error during inference for sample ID ([^:]+):([^\n]*)", log):
+            error_id, message = match.groups()
+            error_ids.add(error_id)
+            if "content_policy_violation" in message:
+                policy_error_ids.add(error_id)
+    counts["errors"] = len(error_ids)
+    counts["policy_errors"] = len(policy_error_ids)
     counts["unique"] = len(set(identities))
     counts["duplicates"] = len(identities) - counts["unique"]
     return counts
@@ -293,6 +427,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             primary = None
             alerts.append(str(exc))
         health = prediction_health(root, case["resolved_generation"]["max_tokens"])
+        token_lengths = outcome_token_statistics(root, case["primary_metric"])
         planned = case["planned_samples"]
         coverage = {"planned": planned, **health,
                     "scored": primary.get("num") if primary else None,
@@ -307,13 +442,16 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                 or coverage["scored"] < planned:
             status = "incomplete"
             alerts.append("Coverage is below the planned sample count")
-        elif health["errors"] or health["capped"] or health["duplicates"]:
+        elif health["errors"] or health["retries"] or health["capped"] \
+                or health["duplicates"] or health["unparsed"]:
             status = "warning"
-            alerts.append("Response health checks found errors, token caps, or duplicate samples")
+            alerts.append(
+                "Response health checks found errors, retries, empty outputs, token caps, or duplicates")
         else:
             status = "pass"
         results.append({"case_id": case["id"], "dataset": case["dataset"], "status": status,
-                        "primary_metric": primary, "coverage": coverage, "alerts": alerts})
+                        "primary_metric": primary, "coverage": coverage,
+                        "output_tokens_by_outcome": token_lengths, "alerts": alerts})
     rank = {"pass": 0, "warning": 1, "incomplete": 2, "failed": 3}
     overall = max((item["status"] for item in results), key=lambda value: rank[value])
     run_id = manifest.get("run_id") if isinstance(manifest.get("run_id"), str) else run_dir.name
@@ -355,6 +493,91 @@ def _result_table(summaries: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _health_table(summaries: list[dict[str, Any]]) -> list[str]:
+    headers = ["Model / GGUF", "Status", "Outputs", "Scored", "Empty / unparsed",
+               "Request errors", "Retries", "Token-capped", "Duplicates",
+               "Affected benchmarks"]
+    lines = ["| " + " | ".join(headers) + " |",
+             "|---|:---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    status_labels = {"pass": "OK", "warning": "Warning", "incomplete": "Incomplete",
+                     "failed": "Failed"}
+    for summary in summaries:
+        planned = outputs = scored = empty = errors = retries = capped = duplicates = 0
+        details = []
+        for case in summary["cases"]:
+            coverage = case["coverage"]
+            case_planned = coverage["planned"]
+            case_scored = coverage.get("scored")
+            case_empty = coverage["unparsed"]
+            planned += case_planned
+            outputs += coverage["unique"]
+            scored += case_scored if isinstance(case_scored, int) \
+                and not isinstance(case_scored, bool) else 0
+            empty += case_empty
+            errors += coverage["errors"]
+            retries += coverage["retries"]
+            capped += coverage["capped"]
+            duplicates += coverage["duplicates"]
+
+            issues = []
+            if coverage["missing"]:
+                issues.append(f"{coverage['missing']} missing")
+            if case_empty:
+                issues.append(f"{case_empty} empty/unparsed")
+            if coverage["errors"]:
+                issues.append(f"{coverage['errors']} errors")
+            if coverage["policy_errors"]:
+                issues.append(f"{coverage['policy_errors']} content-policy rejections")
+            if coverage["retries"]:
+                retry_detail = f"{coverage['retries']} retries"
+                if coverage["policy_retries"]:
+                    retry_detail += f" ({coverage['policy_retries']} content-policy)"
+                issues.append(retry_detail)
+            if coverage["capped"]:
+                issues.append(f"{coverage['capped']} token-capped")
+            if coverage["duplicates"]:
+                issues.append(f"{coverage['duplicates']} duplicates")
+            if case_scored is None:
+                issues.append("score unavailable")
+            elif isinstance(case_scored, int) and not isinstance(case_scored, bool) \
+                    and case_scored < case_planned:
+                issues.append(f"{case_planned - case_scored} unscored")
+            if issues:
+                details.append(f"{case['case_id']}: {', '.join(issues)}")
+
+        model = summary["manifest"].get("backend", {}).get("model")
+        values = [model, status_labels.get(summary["status"], summary["status"]),
+                  f"{outputs}/{planned}", f"{scored}/{planned}", empty, errors, retries,
+                  capped, duplicates, "; ".join(details) or "None"]
+        lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
+    return lines
+
+
+def _token_value(value: Any, *, mean: bool = False) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "—"
+    return f"{value:,.1f}" if mean else f"{int(value):,}"
+
+
+def _token_length_table(summaries: list[dict[str, Any]]) -> list[str]:
+    headers = ["Model / GGUF", "Benchmark", "Outcome", "Scored samples",
+               "With token usage", "Mean", "Min", "P5", "P95", "Max"]
+    lines = ["| " + " | ".join(headers) + " |",
+             "|---|---|:---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for summary in summaries:
+        model = summary["manifest"].get("backend", {}).get("model")
+        for case in summary["cases"]:
+            groups = case.get("output_tokens_by_outcome", {})
+            for name, label in (("correct", "Correct"), ("incorrect", "Incorrect")):
+                stats = groups.get(name, {})
+                values = [model, case["case_id"], label, stats.get("scored", 0),
+                          stats.get("with_tokens", 0), _token_value(stats.get("mean"), mean=True),
+                          _token_value(stats.get("min")), _token_value(stats.get("p5")),
+                          _token_value(stats.get("p95")), _token_value(stats.get("max"))]
+                lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
+    return lines
+
+
 def markdown(summary: dict[str, Any]) -> str:
     lines = [f"# {summary['suite'].get('title', summary['suite']['id'])}", "",
              *_result_table([summary]), ""]
@@ -376,9 +599,6 @@ def comparison(run_dirs: list[Path], title: str | None = None) -> str:
     summaries = []
     for run_dir in run_dirs:
         summaries.append(summarize_run(run_dir))
-    profile_hashes = {item["manifest"]["profile"]["sha256"] for item in summaries}
-    if len(profile_hashes) != 1:
-        raise BenchError("Compared runs must use byte-identical profiles")
     case_ids = [[case["case_id"] for case in item["cases"]] for item in summaries]
     if any(ids != case_ids[0] for ids in case_ids[1:]):
         raise BenchError("Compared runs do not contain the same ordered benchmark cases")
@@ -388,7 +608,12 @@ def comparison(run_dirs: list[Path], title: str | None = None) -> str:
 
     resolved_title = title or (
         "GGUF benchmark results" if len(summaries) == 1 else "GGUF benchmark comparison")
-    lines = [f"# {resolved_title}", "", *_result_table(summaries), ""]
+    lines = [f"# {resolved_title}", "", *_result_table(summaries), "",
+             "## Output health", "", *_health_table(summaries), "",
+             "## Output token length by outcome", "",
+             "Token counts are summed across all model calls in each sample. P5 and P95 use "
+             "the nearest-rank method. Samples without API token usage remain in `Scored samples` "
+             "but are excluded from the distribution.", "", *_token_length_table(summaries), ""]
     return "\n".join(lines)
 
 

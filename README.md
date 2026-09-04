@@ -33,9 +33,11 @@ export PATH="$PWD/llama.cpp/build/bin:$PATH"
 | Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | 198 | 198 | `mean_acc` |
 | Qwen3.8 thinking | AIME 2026 | `aime26` | 30 | 30 | `mean_acc` |
 | Qwen3.8 thinking | IFEval | `ifeval` | 541 | 541 | `mean_prompt_level_strict` |
-| Qwen3.8 thinking | BFCL v4 Quick | `bfcl_v4` | 5,106 | 200 | `acc` |
+| Qwen3.8 thinking (default) | BFCL v4 Quick | `bfcl_v4` | 5,106 | 200 | `acc` |
+| Qwen3.8 thinking (1K profile) | BFCL v4 1K | `bfcl_v4` | 5,106 | 1,002 | `acc` |
+| Qwen3.8 thinking (non-Web full profile) | BFCL v4 — All non-Web-Search tasks | `bfcl_v4` | 5,106 | 4,906 | `acc` |
 
-BFCL v4 Quick evaluates 10 fixed categories with 20 examples each. It excludes memory and Web Search tasks, so no SerpAPI key is needed.
+The default profile keeps BFCL v4 Quick for iteration: 10 fixed categories with 20 examples each. The `*-bfcl-1k.json` profiles take up to the first 56 examples from every non-Web-Search scoring category, producing 1,002 rows; with shuffling disabled, all 200 Quick examples are a strict subset. The `*-bfcl-non-web.json` profiles evaluate all 4,906 non-Web-Search rows. All three options exclude Web Search, so no SerpAPI key is needed. The 1K and non-Web results are not the official BFCL v4 Overall score, which includes Web Search.
 
 Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
 
@@ -94,14 +96,14 @@ python3 benchmark.py compare \
   --output results/qwen3.8-27b.md
 ```
 
-Pass one run directory to summarize it, or multiple run directories to compare them. The generated Markdown contains one result table. GGUF size and MTP-free size are detected from the file automatically.
+Pass one run directory to summarize it, or multiple run directories to compare them. The generated Markdown contains a score table, an output-health table, and per-benchmark output-token distributions for correct and incorrect samples (mean, minimum, P5, P95, and maximum). Multi-turn token counts are summed across model calls, while samples missing API usage metadata are reported but excluded from the distribution. GGUF size and MTP-free size are detected from the file automatically.
 
 | Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v4 Quick |
 |---|---:|:---:|---:|---:|---:|---:|---:|
 | Project GGUF | ... | Yes | ... | ... | ... | ... | ... |
 | Community GGUF | ... | No | ... | ... | ... | ... | ... |
 
-Runs can be compared only when their profile SHA-256 values match. No HTML or composite score is generated.
+Runs must contain the same ordered benchmark cases. Model-specific generation settings may differ and remain recorded in each run. No HTML or composite score is generated.
 
 ## OpenAI-compatible API
 
