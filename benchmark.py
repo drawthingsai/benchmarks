@@ -34,6 +34,7 @@ LLAMA_CPP_COMMIT = "0df974d777c904dda1da3b00faa7769c6310ae74"
 BFCL_EVAL_VERSION = "2025.10.27.1"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
+BFCL_STEP_LOG = re.compile(r"^ID: .+, Turn: \d+, Step: \d+$")
 GGUF_SCALARS = {
     0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f",
     7: "?", 10: "Q", 11: "q", 12: "d",
@@ -540,6 +541,16 @@ def evalscope_command(profile: dict[str, Any], case: dict[str, Any], model: str,
     return argv
 
 
+def forward_evalscope_stdout(stream: Any) -> None:
+    """Forward evaluator output while hiding BFCL's per-step debug prints."""
+    for line in stream:
+        content = line.rstrip("\r\n")
+        if content == "-" * 100 or BFCL_STEP_LOG.fullmatch(content):
+            continue
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
 def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url: str,
              attempt: Path, key_env: str | None, eval_batch_size: int,
              resume_cache: Path | None = None) -> int:
@@ -571,8 +582,21 @@ def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url:
     environment = os.environ.copy()
     if key_env:
         environment.pop(key_env, None)
-    process = subprocess.Popen(argv, cwd="/tmp", env=environment, start_new_session=True)
+    environment["PYTHONUNBUFFERED"] = "1"
+    process = subprocess.Popen(
+        argv,
+        cwd="/tmp",
+        env=environment,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
     try:
+        assert process.stdout is not None
+        forward_evalscope_stdout(process.stdout)
         code = process.wait()
     except BaseException as exc:
         terminate_process_group(process)
@@ -580,6 +604,9 @@ def run_case(profile: dict[str, Any], case: dict[str, Any], model: str, api_url:
                        "interrupted_by": type(exc).__name__})
         report.write_json(record_path, record)
         raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
     record.update({"finished_at": report.utc_now(), "return_code": code})
     report.write_json(record_path, record)
     return code
@@ -605,6 +632,14 @@ def resumable_profile(path: Path) -> dict[str, Any]:
     return profile
 
 
+def resumable_case(case: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields that can change evaluator inputs or execution."""
+    contract = dict(case)
+    contract.pop("primary_metric", None)
+    contract.pop("expected_samples", None)
+    return contract
+
+
 def profile_transition(original_path: Path, requested_path: Path) -> bool:
     """Allow a profile to add or replace cases without invalidating reusable cases."""
     original = resumable_profile(original_path)
@@ -622,8 +657,10 @@ def profile_transition(original_path: Path, requested_path: Path) -> bool:
     if shared_ids and original_settings != requested_settings:
         raise report.BenchError(
             "Cannot resume: shared cases use different generation or EvalScope settings")
-    changed = sorted(case_id for case_id in shared_ids
-                     if original_cases[case_id] != requested_cases[case_id])
+    changed = sorted(
+        case_id for case_id in shared_ids
+        if resumable_case(original_cases[case_id]) != resumable_case(requested_cases[case_id])
+    )
     if changed:
         raise report.BenchError(
             f"Cannot resume: shared case definitions changed: {', '.join(changed)}")
