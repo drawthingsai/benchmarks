@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import http.client
 import importlib.metadata
@@ -35,6 +36,7 @@ BFCL_EVAL_VERSION = "2025.10.27.1"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
 BFCL_STEP_LOG = re.compile(r"^ID: .+, Turn: \d+, Step: \d+$")
+LEGACY_RUN_ACTIVITY_GRACE_SECONDS = 300
 GGUF_SCALARS = {
     0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f",
     7: "?", 10: "Q", 11: "q", 12: "d",
@@ -190,6 +192,45 @@ def terminate_process_group(process: subprocess.Popen[Any], grace_seconds: float
 def safe_name(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
     return normalized[:80] or "run"
+
+
+def acquire_run_lock(run_dir: Path) -> Any:
+    """Prevent two current runners from writing the same run directory."""
+    path = run_dir / ".run.lock"
+    handle = path.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise report.BenchError(
+            f"Run {run_dir.name!r} is already active in another benchmark.py process"
+        ) from None
+    return handle
+
+
+def process_is_alive(pid: Any) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def latest_run_activity(run_dir: Path) -> float:
+    """Return the newest run artifact timestamp, excluding the lock itself."""
+    latest = 0.0
+    for path in run_dir.rglob("*"):
+        if path.name == ".run.lock" or not path.is_file():
+            continue
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except FileNotFoundError:
+            pass
+    return latest
 
 
 def validate_url(value: str) -> urllib.parse.SplitResult:
@@ -705,7 +746,20 @@ def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
 
     status = report.load_json(run_dir / "status.json")
     if status.get("state") == "running":
-        raise report.BenchError("Cannot resume a run that is still marked as running; stop it first")
+        owner_host = status.get("hostname")
+        owner_pid = status.get("pid")
+        local_host = socket.gethostname()
+        if owner_host in {None, local_host} and process_is_alive(owner_pid):
+            raise report.BenchError(
+                f"Cannot resume: run {run_dir.name!r} is still active as PID {owner_pid}"
+            )
+        if owner_host is None:
+            idle_seconds = time.time() - latest_run_activity(run_dir)
+            if idle_seconds < LEGACY_RUN_ACTIVITY_GRACE_SECONDS:
+                raise report.BenchError(
+                    "Cannot resume: this legacy run has recent activity but no host identity; "
+                    "wait five minutes after it stops"
+                )
     requested = report.load_json(profile_path)
     has_pending_case = any(
         not case_completed(run_dir / "cases" / case["id"] / "attempt-0001")
@@ -839,12 +893,17 @@ def run(args: argparse.Namespace) -> int:
     if args.resume:
         if not run_dir.is_dir():
             raise report.BenchError(f"Cannot resume: run directory does not exist: {run_dir}")
-        if validate_resume(run_dir, args, model, public_endpoint, profile_path, version):
-            adopt_resume_profile(run_dir, profile_path)
     else:
         if run_dir.exists():
             raise report.BenchError(f"Run directory already exists: {run_dir}")
         run_dir.mkdir(parents=True)
+    # Keep this handle alive for the entire run. The OS releases the lock on exit,
+    # including SIGINT, SIGTERM, crashes, and SSH disconnects.
+    run_lock = acquire_run_lock(run_dir)
+    if args.resume:
+        if validate_resume(run_dir, args, model, public_endpoint, profile_path, version):
+            adopt_resume_profile(run_dir, profile_path)
+    else:
         (run_dir / "profile.json").write_text(profile_path.read_text(encoding="utf-8"), encoding="utf-8")
         backend: dict[str, Any]
         if args.gguf:
@@ -869,6 +928,7 @@ def run(args: argparse.Namespace) -> int:
         report.write_json(run_dir / "manifest.json", manifest)
     report.write_json(run_dir / "status.json", {
         "state": "running", "resumed": args.resume, "pid": os.getpid(),
+        "hostname": socket.gethostname(),
         "updated_at": report.utc_now(),
     })
     service = llama_servers(args, model, run_dir) if args.gguf else nullcontext(args.url)
@@ -890,13 +950,16 @@ def run(args: argparse.Namespace) -> int:
         report.write_json(run_dir / "status.json", {"state": "finished", "result": summary["status"],
                                                      "updated_at": report.utc_now()})
         print(f"Markdown report: {run_dir / 'report.md'}")
+        run_lock.close()
         return 0 if summary["status"] in {"pass", "warning"} else 1
     except KeyboardInterrupt:
         report.write_json(run_dir / "status.json", {"state": "interrupted",
                                                        "updated_at": report.utc_now()})
+        run_lock.close()
         raise
     except BaseException:
         report.write_json(run_dir / "status.json", {"state": "failed", "updated_at": report.utc_now()})
+        run_lock.close()
         raise
 
 
