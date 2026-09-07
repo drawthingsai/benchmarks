@@ -31,7 +31,6 @@ import report
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILE = ROOT / "profiles" / "smoke.json"
-LLAMA_CPP_COMMIT = "0df974d777c904dda1da3b00faa7769c6310ae74"
 BFCL_EVAL_VERSION = "2025.10.27.1"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
@@ -128,17 +127,15 @@ def gguf_inventory(path: Path) -> dict[str, Any]:
 
 
 def llama_server_identity(binary: str) -> str:
+    """Record version information when available without restricting the build."""
     try:
         result = subprocess.run([binary, "--version"], capture_output=True, text=True,
                                 timeout=10, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise report.BenchError(f"Could not read llama-server version: {exc}") from exc
-    identity = " ".join(f"{result.stdout}\n{result.stderr}".split())
-    if result.returncode or LLAMA_CPP_COMMIT[:9] not in identity:
-        raise report.BenchError(
-            f"llama-server must be built from llama.cpp {LLAMA_CPP_COMMIT}; found: "
-            f"{identity or 'unknown version'}")
-    return identity
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown version"
+    if result.returncode:
+        return "unknown version"
+    return " ".join(f"{result.stdout}\n{result.stderr}".split()) or "unknown version"
 
 
 def accelerator_devices(binary: str) -> list[str]:
@@ -910,8 +907,7 @@ def run(args: argparse.Namespace) -> int:
             server_identity = llama_server_identity(binary)
             backend = {"type": "gguf", "model": model,
                        "gguf": gguf_inventory(args.gguf),
-                       "llama_server": {"path": binary, "version": server_identity,
-                                        "commit": LLAMA_CPP_COMMIT},
+                       "llama_server": {"path": binary, "version": server_identity},
                        "ctx_size_per_server": args.ctx_size, "parallel": args.parallel,
                        "devices": args.server_devices,
                        "slots_per_server": args.slots_per_server,

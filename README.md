@@ -16,11 +16,10 @@ conda activate benchmarks
 python3 -m pip install 'evalscope[bfcl,ifeval]==1.11.0' 'soundfile==0.13.1'
 ```
 
-For local GGUF runs, use llama.cpp commit `0df974d777c904dda1da3b00faa7769c6310ae74` (`llama.cpp 0.3.0-dev`, build `474`). Build `llama-server` from that exact revision and place `llama.cpp/build/bin` on `PATH`:
+For local GGUF runs, use a llama.cpp build that supports your model and the server arguments below. The runner records `llama-server --version` when available; a different or unknown version does not block the run. Use the same build across runs for reproducible comparisons. Example CUDA build:
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git
-git -C llama.cpp checkout 0df974d777c904dda1da3b00faa7769c6310ae74
 cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
 cmake --build llama.cpp/build --target llama-server -j
 export PATH="$PWD/llama.cpp/build/bin:$PATH"
