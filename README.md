@@ -97,6 +97,8 @@ python3 benchmark.py compare \
 
 Pass one run directory to summarize it, or multiple run directories to compare them. The generated Markdown contains a score table, an output-health table, and per-benchmark output-token distributions for correct and incorrect samples (mean, minimum, P5, P95, and maximum). Multi-turn token counts are summed across model calls, while samples missing API usage metadata are reported but excluded from the distribution. GGUF size and MTP-free size are detected from the file automatically.
 
+Report and compare commands also accept bare run names under `./runs/`, for example `python3 benchmark.py report project-q2-k` or `python3 benchmark.py compare project-q2-k community-a-q2-k --output results/comparison.md`. Existing paths take precedence. The same applies to `report.py run` and `report.py compare`.
+
 | Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v4 Quick |
 |---|---:|:---:|---:|---:|---:|---:|---:|
 | Project GGUF | ... | Yes | ... | ... | ... | ... | ... |

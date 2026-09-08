@@ -806,10 +806,11 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--generate", action="store_true",
                         help="send one minimal generation request; this may incur API charges")
     rebuild = commands.add_parser("report", help="rebuild one completed run report")
-    rebuild.add_argument("run_dir", type=Path)
+    rebuild.add_argument("run_dir", type=Path, help="run directory or name under runs/")
     compare = commands.add_parser(
         "compare", help="summarize or compare one or more completed runs")
-    compare.add_argument("run_dirs", nargs="+", type=Path)
+    compare.add_argument("run_dirs", nargs="+", type=Path,
+                         help="run directories or names under runs/")
     compare.add_argument("--output", type=Path, required=True)
     compare.add_argument("--title")
     return root
@@ -972,12 +973,12 @@ def main(argv: list[str] | None = None) -> int:
             result["endpoint"] = redact_url(args.url)
             print(json.dumps(result, indent=2))
         elif args.command == "report":
-            run_dir = args.run_dir.expanduser().resolve()
+            run_dir = report.resolve_run_dir(args.run_dir)
             summary = report.summarize_run(run_dir)
             report.write_reports(run_dir, summary)
             print(f"Markdown report: {run_dir / 'report.md'}")
         else:
-            run_dirs = [path.expanduser().resolve() for path in args.run_dirs]
+            run_dirs = [report.resolve_run_dir(path) for path in args.run_dirs]
             output = args.output.expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(report.comparison(run_dirs, args.title), encoding="utf-8")

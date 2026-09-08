@@ -223,3 +223,6 @@ __marimo__/
 run.sh
 profiles/*-2b-*.json
 outputs/
+profiles/*-aime-gpqa.json
+!results/README.md
+results/

@@ -19,6 +19,14 @@ class BenchError(RuntimeError):
     """An expected error suitable for direct display in the CLI."""
 
 
+def resolve_run_dir(path: Path) -> Path:
+    """Accept an existing path or a bare run name under ./runs/."""
+    path = path.expanduser()
+    if not path.is_absolute() and len(path.parts) == 1 and not path.exists():
+        path = Path("runs") / path
+    return path.resolve()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -471,24 +479,31 @@ def _size(value: Any) -> str:
 
 
 def _result_table(summaries: list[dict[str, Any]]) -> list[str]:
-    cases = summaries[0]["cases"]
+    case_ids = list(dict.fromkeys(
+        case["case_id"]
+        for summary in summaries
+        for case in summary["cases"]
+    ))
     benchmark_headers = []
-    for index, case in enumerate(cases):
-        metric = next((summary["cases"][index].get("primary_metric") for summary in summaries
-                       if summary["cases"][index].get("primary_metric")), None)
+    for case_id in case_ids:
+        metric = next((case.get("primary_metric") for summary in summaries
+                       for case in summary["cases"]
+                       if case["case_id"] == case_id and case.get("primary_metric")), None)
         benchmark_headers.append(
-            f"{case['case_id']} ({metric['name'] if metric else 'score'})")
+            f"{case_id} ({metric['name'] if metric else 'score'})")
     headers = ["Model / GGUF", "GGUF size", "MTP", "Size without MTP", *benchmark_headers]
     lines = ["| " + " | ".join(_cell(value) for value in headers) + " |",
              "|---|---:|:---:|---:|" + "---:|" * len(benchmark_headers)]
     for summary in summaries:
         backend = summary["manifest"].get("backend", {})
         artifact = backend.get("gguf", {})
+        cases = {case["case_id"]: case for case in summary["cases"]}
         has_mtp = artifact.get("has_mtp")
         mtp = "Yes" if has_mtp is True else "No" if has_mtp is False else "—"
         values = [backend.get("model"), _size(artifact.get("size_bytes")), mtp,
                   _size(artifact.get("size_without_mtp_bytes")),
-                  *(_score(case.get("primary_metric")) for case in summary["cases"])]
+                  *(_score(cases[case_id].get("primary_metric")) if case_id in cases else "—"
+                    for case_id in case_ids)]
         lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
     return lines
 
@@ -599,9 +614,6 @@ def comparison(run_dirs: list[Path], title: str | None = None) -> str:
     summaries = []
     for run_dir in run_dirs:
         summaries.append(summarize_run(run_dir))
-    case_ids = [[case["case_id"] for case in item["cases"]] for item in summaries]
-    if any(ids != case_ids[0] for ids in case_ids[1:]):
-        raise BenchError("Compared runs do not contain the same ordered benchmark cases")
     labels = [item["manifest"]["backend"]["model"] for item in summaries]
     if len(set(labels)) != len(labels):
         raise BenchError("Compared runs must have unique model names; set --model-name when running")
@@ -609,6 +621,9 @@ def comparison(run_dirs: list[Path], title: str | None = None) -> str:
     resolved_title = title or (
         "GGUF benchmark results" if len(summaries) == 1 else "GGUF benchmark comparison")
     lines = [f"# {resolved_title}", "", *_result_table(summaries), "",
+             "A dash means that the run did not include that benchmark. Results from "
+             "`bfcl-v4-quick` and `bfcl-v4-1k` use different sample sets and must not be "
+             "compared as the same benchmark.", "",
              "## Output health", "", *_health_table(summaries), "",
              "## Output token length by outcome", "",
              "Token counts are summed across all model calls in each sample. P5 and P95 use "
@@ -621,21 +636,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build Markdown GGUF benchmark reports")
     commands = parser.add_subparsers(dest="command", required=True)
     single = commands.add_parser("run", help="rebuild one run report")
-    single.add_argument("run_dir", type=Path)
+    single.add_argument("run_dir", type=Path, help="run directory or name under runs/")
     compare = commands.add_parser(
         "compare", help="summarize or compare one or more completed runs")
-    compare.add_argument("run_dirs", nargs="+", type=Path)
+    compare.add_argument("run_dirs", nargs="+", type=Path,
+                         help="run directories or names under runs/")
     compare.add_argument("--output", type=Path, required=True)
     compare.add_argument("--title")
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
-            run_dir = args.run_dir.expanduser().resolve()
+            run_dir = resolve_run_dir(args.run_dir)
             summary = summarize_run(run_dir)
             write_reports(run_dir, summary)
             print(f"Reports written to {run_dir}")
         else:
-            run_dirs = [path.expanduser().resolve() for path in args.run_dirs]
+            run_dirs = [resolve_run_dir(path) for path in args.run_dirs]
             output = args.output.expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(comparison(run_dirs, args.title), encoding="utf-8")
