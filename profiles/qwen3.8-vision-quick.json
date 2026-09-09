@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "suite": {
+    "id": "qwen38-vision-quick-v1",
+    "title": "Qwen3.8 vision quick comparison (200 samples)",
+    "modality": "vision",
+    "description": "Prepared seed-42 subsets: 100 RealWorldQA questions and 10 examples from each of 10 OCRBench categories. Not full benchmark scores. Run prepare_vision_quick.py first."
+  },
+  "generation": {
+    "temperature": 0.0,
+    "max_tokens": 1024,
+    "timeout": 180,
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": false}}
+  },
+  "evalscope": {"seed": 42, "eval_batch_size": 4, "dataset_hub": "huggingface", "collect_perf": true},
+  "cases": [
+    {
+      "id": "realworldqa-100", "dataset": "real_world_qa", "expected_samples": 100,
+      "dataset_args": {"dataset_id": "PREPARE_REALWORLDQA", "eval_split": "test", "shuffle": false},
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "ocrbench-100", "dataset": "ocr_bench", "expected_samples": 100,
+      "dataset_args": {"dataset_id": "PREPARE_OCRBENCH", "eval_split": "test", "shuffle": false},
+      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
+    }
+  ]
+}

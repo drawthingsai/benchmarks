@@ -506,6 +506,10 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
                         "--cache-type-k", "f16", "--cache-type-v", "f16",
                         "--cache-prompt", "--jinja", "--no-context-shift", "--no-webui"]
                 argv.extend(["--spec-type", "draft-mtp" if self.args.mtp else "none"])
+                if self.args.mmproj:
+                    argv.extend(["--mmproj", str(self.args.mmproj.resolve()),
+                                 "--image-min-tokens", str(self.args.image_min_tokens),
+                                 "--image-max-tokens", str(self.args.image_max_tokens)])
                 if self.args.mtp:
                     argv.extend(["--spec-draft-n-max", str(self.args.mtp_draft_tokens)])
                 if self.device:
@@ -741,6 +745,11 @@ def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
         artifact = backend.get("gguf") if isinstance(backend.get("gguf"), dict) else {}
         if artifact.get("path") != str(args.gguf.resolve()):
             raise report.BenchError("Cannot resume: the GGUF path does not match the original run")
+        current_vision = vision_identity(args)
+        if backend.get("vision") != current_vision:
+            raise report.BenchError("Cannot resume: vision files or image limits have changed")
+        if current_vision and artifact.get("sha256") != sha256_file(args.gguf):
+            raise report.BenchError("Cannot resume: the language model weights have changed")
         if backend.get("mtp", False) != args.mtp or (
                 args.mtp and backend.get("mtp_draft_tokens") != args.mtp_draft_tokens):
             raise report.BenchError("Cannot resume: MTP settings do not match the original run")
@@ -783,6 +792,9 @@ def parser() -> argparse.ArgumentParser:
     backend = run.add_mutually_exclusive_group(required=True)
     backend.add_argument("--gguf", type=Path)
     backend.add_argument("--url")
+    run.add_argument("--mmproj", type=Path, help="vision encoder GGUF for a local multimodal run")
+    run.add_argument("--image-min-tokens", type=int, default=64)
+    run.add_argument("--image-max-tokens", type=int, default=4096)
     run.add_argument("--model-name", help="display name and remote API model name")
     run.add_argument("--api-key-env", help="environment variable containing the API key")
     run.add_argument("--api-key-header", default="Authorization")
@@ -826,10 +838,43 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def vision_identity(args: argparse.Namespace) -> dict[str, Any] | None:
+    if not args.mmproj:
+        return None
+    return {"path": str(args.mmproj.resolve()), "sha256": sha256_file(args.mmproj),
+            "size_bytes": args.mmproj.stat().st_size,
+            "image_min_tokens": args.image_min_tokens,
+            "image_max_tokens": args.image_max_tokens}
+
+
+def validate_vision_samples(profile: dict, profile_path: Path) -> None:
+    expected = profile["suite"].get("samples_sha256")
+    if not expected:
+        return
+    manifest = profile_path.parent / "samples.json"
+    if not manifest.is_file() or sha256_file(manifest) != expected:
+        raise report.BenchError("Vision sample manifest fingerprint changed; prepare a new profile")
+    records = report.load_json(manifest)
+    for case in profile["cases"]:
+        artifact = Path(case["dataset_args"]["dataset_id"]) / "data/test-00000-of-00001.parquet"
+        if not artifact.is_file() or sha256_file(artifact) != records[case["dataset"]]["parquet_sha256"]:
+            raise report.BenchError("Vision input data fingerprint changed; prepare a new profile")
+
+
 def run(args: argparse.Namespace) -> int:
     profile_path = args.profile.expanduser().resolve()
     profile = report.load_profile(profile_path)
+    if profile["suite"].get("modality") == "vision" and args.gguf and not args.mmproj:
+        raise report.BenchError("A local vision profile requires --mmproj")
+    if any(str(c.get("dataset_args", {}).get("dataset_id", "")).startswith("PREPARE_")
+           for c in profile["cases"]):
+        raise report.BenchError("Run prepare_vision_quick.py and use its generated profile.json")
+    validate_vision_samples(profile, profile_path)
     key = resolve_key(args.api_key_env)
+    if args.mmproj and (not args.gguf or not args.mmproj.is_file()):
+        raise report.BenchError("--mmproj requires --gguf and an existing vision GGUF file")
+    if not 0 < args.image_min_tokens <= args.image_max_tokens:
+        raise report.BenchError("Image token limits must be positive and min <= max")
     if args.resume and not args.run_id:
         raise report.BenchError("--resume requires --run-id")
     profile_batch_size = profile.get("evalscope", {}).get("eval_batch_size", 1)
@@ -893,6 +938,10 @@ def run(args: argparse.Namespace) -> int:
                           "ctx_size_per_server": args.ctx_size,
                           "slot_context": args.ctx_size // args.slots_per_server,
                           "mtp": args.mtp, "mtp_draft_tokens": args.mtp_draft_tokens}
+        if args.mmproj:
+            plan["server"].update({"mmproj": str(args.mmproj.resolve()),
+                                   "image_min_tokens": args.image_min_tokens,
+                                   "image_max_tokens": args.image_max_tokens})
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
@@ -935,6 +984,9 @@ def run(args: argparse.Namespace) -> int:
                        "slot_context": args.ctx_size // args.slots_per_server,
                        "gpu_layers": args.gpu_layers,
                        "mtp": args.mtp, "mtp_draft_tokens": args.mtp_draft_tokens}
+            if args.mmproj:
+                backend["vision"] = vision_identity(args)
+                backend["gguf"]["sha256"] = sha256_file(args.gguf)
         else:
             backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
                        "api_key_env": args.api_key_env, "api_key_header": args.api_key_header,

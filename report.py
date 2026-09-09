@@ -491,17 +491,23 @@ def _result_table(summaries: list[dict[str, Any]]) -> list[str]:
                        if case["case_id"] == case_id and case.get("primary_metric")), None)
         benchmark_headers.append(
             f"{case_id} ({metric['name'] if metric else 'score'})")
-    headers = ["Model / GGUF", "GGUF size", "MTP", "Size without MTP", *benchmark_headers]
+    has_vision = any(s["manifest"].get("backend", {}).get("vision") for s in summaries)
+    vision_headers = ["Vision GGUF", "Vision size (MiB)"] if has_vision else []
+    headers = ["Model / GGUF", "GGUF size", "MTP", "Size without MTP", *vision_headers, *benchmark_headers]
     lines = ["| " + " | ".join(_cell(value) for value in headers) + " |",
-             "|---|---:|:---:|---:|" + "---:|" * len(benchmark_headers)]
+             "|---|---:|:---:|---:|" + ("---|---:|" if has_vision else "") + "---:|" * len(benchmark_headers)]
     for summary in summaries:
         backend = summary["manifest"].get("backend", {})
         artifact = backend.get("gguf", {})
         cases = {case["case_id"]: case for case in summary["cases"]}
         has_mtp = artifact.get("has_mtp")
         mtp = "Yes" if has_mtp is True else "No" if has_mtp is False else "—"
+        vision = backend.get("vision") or {}
+        vision_values = ([Path(vision["path"]).name, f"{vision['size_bytes'] / 1024**2:.2f}"]
+                         if vision else ["—", "—"]) if has_vision else []
         values = [backend.get("model"), _size(artifact.get("size_bytes")), mtp,
                   _size(artifact.get("size_without_mtp_bytes")),
+                  *vision_values,
                   *(_score(cases[case_id].get("primary_metric")) if case_id in cases else "—"
                     for case_id in case_ids)]
         lines.append("| " + " | ".join(_cell(value) for value in values) + " |")

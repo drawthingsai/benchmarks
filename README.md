@@ -1,6 +1,6 @@
 # Reproducible GGUF Comparisons
 
-Reproduce comparisons between project-built and community GGUF files on GPQA Diamond, AIME, IFEval, and BFCL. EvalScope 1.11.0 is the evaluation engine; this repository provides the runner and clean Markdown result tables.
+Reproduce comparisons between project-built and community GGUF files on GPQA Diamond, AIME, IFEval, and BFCL. EvalScope 1.11.0 is the evaluation engine; this repository provides the runner and clean Markdown result tables. A 200-sample vision profile also covers RealWorldQA and OCRBench.
 
 ## Install
 
@@ -45,6 +45,59 @@ Choose a profile explicitly for a comparison run:
 The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. Both bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
 
 Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
+
+## Quick vision comparison (200 samples)
+
+Use `prepare_vision_quick.py` to select **100 RealWorldQA** examples (seed 42)
+and **100 OCRBench** examples (10 per category, seed 42). These are small subset
+scores, not full benchmark scores. RealWorldQA measures visual understanding;
+OCRBench covers text recognition and document questions. Scoring uses EvalScope's
+existing adapters, with no external judge. The profile disables thinking and uses
+temperature 0, a 1,024-token output limit, and four concurrent requests.
+
+Download the pinned source data once (or use an existing local copy):
+
+```bash
+vision_data="$PWD/.workspace/cache/vision-data"
+hf download xai-org/RealworldQA --repo-type dataset \
+  --revision 17e7f75e092e47169732462ea3cdfebe911105dd --include 'data/*.parquet' \
+  --local-dir "$vision_data/datasets/vision/xai-org/RealworldQA/17e7f75e092e47169732462ea3cdfebe911105dd/raw"
+hf download echo840/OCRBench --repo-type dataset \
+  --revision 92a54bd1384387c178d5a07140a2d85e0a3d12e1 --include 'data/*.parquet' \
+  --local-dir "$vision_data/datasets/vision/echo840/OCRBench/92a54bd1384387c178d5a07140a2d85e0a3d12e1/raw"
+python3 prepare_vision_quick.py --data-root "$vision_data" \
+  --output-dir .workspace/vision-quick-data
+```
+
+The generated `samples.json` records source revisions, selected row indices,
+image hashes and prepared-data hashes. WebP images are transported as lossless PNG
+for llama.cpp compatibility, preserving decoded pixels and dimensions. The runner
+verifies prepared-data fingerprints before evaluation. Reuse the generated profile
+for every vision encoder and keep the language-model GGUF and server build fixed:
+
+```bash
+model_dir=/path/to/Qwen3.8-27B-GGUF
+for format in Q6_K Q5_K Q4_K BF16 F16 Q8_0; do
+  python3 benchmark.py run \
+    --profile .workspace/vision-quick-data/profile.json \
+    --gguf "$model_dir/Qwen3.8-27B-DT-IQ3_XXS.gguf" \
+    --mmproj "$model_dir/mmproj-Qwen3.8-27B-DT-$format.gguf" \
+    --image-min-tokens 64 --image-max-tokens 4096 \
+    --parallel 4 --ctx-size 32768 \
+    --model-name "IQ3-vision-$format" --run-id "IQ3-vision-$format" \
+    --output-dir .workspace/vision-runs
+done
+python3 benchmark.py compare \
+  .workspace/vision-runs/IQ3-vision-{Q6_K,Q5_K,Q4_K,BF16,F16,Q8_0} \
+  --output .workspace/vision-comparison.md
+```
+
+BF16 is the vision baseline; the language model remains quantized in all six
+runs. Image token limits bound server preprocessing while preserving aspect ratio.
+Manifests also record language-model and vision GGUF hashes. Result tables include
+the vision filename and size in MiB. With only 100 examples per dataset, one answer
+changes its score by one percentage point; small differences need larger follow-up
+runs before drawing conclusions.
 
 ## Run a GGUF
 
