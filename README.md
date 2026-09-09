@@ -32,11 +32,21 @@ export PATH="$PWD/llama.cpp/build/bin:$PATH"
 | Qwen3.8 thinking | GPQA Diamond | `gpqa_diamond` | 198 | 198 | `mean_acc` |
 | Qwen3.8 thinking | AIME 2026 | `aime26` | 30 | 30 | `mean_acc` |
 | Qwen3.8 thinking | IFEval | `ifeval` | 541 | 541 | `mean_prompt_level_strict` |
-| Qwen3.8 thinking (default) | BFCL v4 Quick | `bfcl_v4` | 5,106 | 200 | `acc` |
-| Qwen3.8 thinking (1K profile) | BFCL v4 1K | `bfcl_v4` | 5,106 | 1,002 | `acc` |
+| Qwen3.8 thinking (default comparison profile) | BFCL v4 1K | `bfcl_v4` | 5,106 | 1,002 | `acc` |
 | Qwen3.8 thinking (non-Web full profile) | BFCL v4 — All non-Web-Search tasks | `bfcl_v4` | 5,106 | 4,906 | `acc` |
 
-The default profile keeps BFCL v4 Quick for iteration: 10 fixed categories with 20 examples each. The `*-bfcl-1k.json` profiles take up to the first 56 examples from every non-Web-Search scoring category, producing 1,002 rows; with shuffling disabled, all 200 Quick examples are a strict subset. The `*-bfcl-non-web.json` profiles evaluate all 4,906 non-Web-Search rows. All three options exclude Web Search, so no SerpAPI key is needed. The 1K and non-Web results are not the official BFCL v4 Overall score, which includes Web Search.
+Choose a profile explicitly for a comparison run:
+
+| Profile file | Evaluations |
+|---|---|
+| `profiles/qwen3.8-thinking.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
+| `profiles/qwen3.8-thinking-aime-gpqa.json` | AIME 2026 and GPQA Diamond only |
+| `profiles/qwen3.8-thinking-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
+| `profiles/minicpm5-2b-0822.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 Quick (200 rows) |
+| `profiles/minicpm5-2b-0822-bfcl-1k.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
+| `profiles/minicpm5-2b-0822-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
+
+The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. MiniCPM5's base profile retains Quick: 10 categories with 20 examples each. All bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
 
 Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
 
@@ -90,10 +100,10 @@ For an MTP comparison, use the same GGUF, profile, and concurrency with distinct
 
 ```bash
 python3 benchmark.py run --gguf /path/to/model.gguf \
-  --profile profiles/qwen3.8-thinking-bfcl-1k.json --parallel 1 \
+  --profile profiles/qwen3.8-thinking.json --parallel 1 \
   --run-id model-no-mtp --model-name model-no-mtp
 python3 benchmark.py run --gguf /path/to/model.gguf \
-  --profile profiles/qwen3.8-thinking-bfcl-1k.json --parallel 1 \
+  --profile profiles/qwen3.8-thinking.json --parallel 1 \
   --mtp --mtp-draft-tokens 3 --run-id model-mtp --model-name model-mtp
 python3 benchmark.py compare model-no-mtp model-mtp --output results/mtp-comparison.md
 ```
@@ -115,12 +125,14 @@ Pass one run directory to summarize it, or multiple run directories to compare t
 
 Report and compare commands also accept bare run names under `./runs/`, for example `python3 benchmark.py report project-q2-k` or `python3 benchmark.py compare project-q2-k community-a-q2-k --output results/comparison.md`. Existing paths take precedence. The same applies to `report.py run` and `report.py compare`.
 
-| Model / GGUF | GGUF size | MTP | Size without MTP | GPQA Diamond | AIME 2026 | IFEval | BFCL v4 Quick |
+| Model / GGUF | GGUF size | MTP | Size without MTP | AIME 2026 | GPQA Diamond | IFEval | BFCL v4 1K |
 |---|---:|:---:|---:|---:|---:|---:|---:|
 | Project GGUF | ... | Yes | ... | ... | ... | ... | ... |
 | Community GGUF | ... | No | ... | ... | ... | ... | ... |
 
 Runs must contain the same ordered benchmark cases. Model-specific generation settings may differ and remain recorded in each run. No HTML or composite score is generated.
+
+Existing Qwen3.8 Quick runs cannot be compared directly with runs using the updated 1K profile. Use a new run ID for the updated profile; `--resume` requires the original profile configuration.
 
 ## OpenAI-compatible API
 
