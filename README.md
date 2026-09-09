@@ -40,13 +40,9 @@ Choose a profile explicitly for a comparison run:
 | Profile file | Evaluations |
 |---|---|
 | `profiles/qwen3.8-thinking.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
-| `profiles/qwen3.8-thinking-aime-gpqa.json` | AIME 2026 and GPQA Diamond only |
 | `profiles/qwen3.8-thinking-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
-| `profiles/minicpm5-2b-0822.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 Quick (200 rows) |
-| `profiles/minicpm5-2b-0822-bfcl-1k.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
-| `profiles/minicpm5-2b-0822-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
 
-The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. MiniCPM5's base profile retains Quick: 10 categories with 20 examples each. All bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
+The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. Both bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
 
 Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
 
