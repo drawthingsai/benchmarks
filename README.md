@@ -170,18 +170,6 @@ python3 benchmark.py run \
   --model-name UD-IQ2_S \
   --run-id UD-IQ2_S
 
-python3 benchmark.py run \
-  --profile profiles/qwen3.8-thinking.json \
-  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" \
-  --model-name UD-Q4_K_M \
-  --run-id UD-Q4_K_M
-
-python3 benchmark.py run \
-  --profile profiles/qwen3.8-thinking.json \
-  --gguf "$HOME/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf" \
-  --model-name Q4_K_M \
-  --run-id Q4_K_M
-
 # AtomicChat
 hf download AtomicChat/Qwen3.8-27B-GGUF \
     Qwen3.8-27B-AD-IQ2_XS.gguf Qwen3.8-27B-AD-IQ1_M.gguf \
