@@ -84,6 +84,22 @@ The command above starts llama-server with these effective arguments:
 
 For local GGUF runs, `--parallel N` sets total EvalScope concurrency. The runner starts one complete model copy per visible accelerator, capped at `N`, and distributes new conversations round-robin. Later turns with the same system and first conversation message return to the same server so llama.cpp can reuse its prompt cache. Each server is pinned to one accelerator with `--split-mode none`; a model is never split across accelerators. Restrict the devices with `CUDA_VISIBLE_DEVICES`. Context is sized per server so every slot retains the full profile limit. The KV cache uses F16 for both K and V.
 
+Add `--mtp` to enable MTP speculative decoding for a local GGUF containing MTP weights. This passes `--spec-type draft-mtp --spec-draft-n-max 3` to each server. Use `--mtp-draft-tokens N` to change the maximum draft length. Without `--mtp`, the runner explicitly passes `--spec-type none`.
+
+For an MTP comparison, use the same GGUF, profile, and concurrency with distinct run IDs and model names:
+
+```bash
+python3 benchmark.py run --gguf /path/to/model.gguf \
+  --profile profiles/qwen3.8-thinking-bfcl-1k.json --parallel 1 \
+  --run-id model-no-mtp --model-name model-no-mtp
+python3 benchmark.py run --gguf /path/to/model.gguf \
+  --profile profiles/qwen3.8-thinking-bfcl-1k.json --parallel 1 \
+  --mtp --mtp-draft-tokens 3 --run-id model-mtp --model-name model-mtp
+python3 benchmark.py compare model-no-mtp model-mtp --output results/mtp-comparison.md
+```
+
+MTP settings appear in `--dry-run` output and are recorded in the run manifest. Resume requires the same MTP settings; existing manifests without MTP settings are treated as disabled. These options apply only to `--gguf`; configure remote services separately. The report table's `MTP` column describes whether the GGUF contains MTP tensors, not whether speculative decoding was enabled.
+
 ## Compare results
 
 ```bash

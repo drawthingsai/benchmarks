@@ -505,6 +505,9 @@ class LlamaServer(AbstractContextManager["LlamaServer"]):
                         "--split-mode", "none",
                         "--cache-type-k", "f16", "--cache-type-v", "f16",
                         "--cache-prompt", "--jinja", "--no-context-shift", "--no-webui"]
+                argv.extend(["--spec-type", "draft-mtp" if self.args.mtp else "none"])
+                if self.args.mtp:
+                    argv.extend(["--spec-draft-n-max", str(self.args.mtp_draft_tokens)])
                 if self.device:
                     argv.extend(["--device", self.device])
                 self.process = subprocess.Popen(argv, stdout=self.handle, stderr=subprocess.STDOUT,
@@ -738,6 +741,9 @@ def validate_resume(run_dir: Path, args: argparse.Namespace, model: str,
         artifact = backend.get("gguf") if isinstance(backend.get("gguf"), dict) else {}
         if artifact.get("path") != str(args.gguf.resolve()):
             raise report.BenchError("Cannot resume: the GGUF path does not match the original run")
+        if backend.get("mtp", False) != args.mtp or (
+                args.mtp and backend.get("mtp_draft_tokens") != args.mtp_draft_tokens):
+            raise report.BenchError("Cannot resume: MTP settings do not match the original run")
     elif backend.get("url") != public_endpoint or backend.get("api_key_header") != args.api_key_header:
         raise report.BenchError("Cannot resume: the API endpoint does not match the original run")
 
@@ -784,6 +790,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--output-dir", type=Path, default=Path("runs"))
     run.add_argument("--run-id")
     run.add_argument("--llama-server", default="llama-server")
+    run.add_argument("--mtp", action="store_true",
+                     help="enable MTP speculative decoding for a local GGUF with MTP weights")
+    run.add_argument("--mtp-draft-tokens", type=int,
+                     help="maximum tokens to draft with --mtp (default: 3)")
     run.add_argument("--ctx-size", type=int,
                      help="context per server; defaults to profile limit times its slots")
     run.add_argument(
@@ -828,6 +838,15 @@ def run(args: argparse.Namespace) -> int:
         raise report.BenchError("profile.evalscope.eval_batch_size must be a positive integer")
     if args.parallel is not None and args.parallel <= 0:
         raise report.BenchError("--parallel must be positive")
+    if args.mtp and not args.gguf:
+        raise report.BenchError("--mtp requires --gguf")
+    if args.mtp_draft_tokens is not None:
+        if not args.mtp:
+            raise report.BenchError("--mtp-draft-tokens requires --mtp")
+        if args.mtp_draft_tokens <= 0:
+            raise report.BenchError("--mtp-draft-tokens must be positive")
+    elif args.mtp:
+        args.mtp_draft_tokens = 3
     if args.gguf:
         if not args.gguf.is_file():
             raise report.BenchError(f"GGUF file does not exist: {args.gguf}")
@@ -872,7 +891,8 @@ def run(args: argparse.Namespace) -> int:
                           "devices": args.server_devices,
                           "slots_per_server": args.slots_per_server,
                           "ctx_size_per_server": args.ctx_size,
-                          "slot_context": args.ctx_size // args.slots_per_server}
+                          "slot_context": args.ctx_size // args.slots_per_server,
+                          "mtp": args.mtp, "mtp_draft_tokens": args.mtp_draft_tokens}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
@@ -913,7 +933,8 @@ def run(args: argparse.Namespace) -> int:
                        "devices": args.server_devices,
                        "slots_per_server": args.slots_per_server,
                        "slot_context": args.ctx_size // args.slots_per_server,
-                       "gpu_layers": args.gpu_layers}
+                       "gpu_layers": args.gpu_layers,
+                       "mtp": args.mtp, "mtp_draft_tokens": args.mtp_draft_tokens}
         else:
             backend = {"type": "openai-compatible", "model": model, "url": public_endpoint,
                        "api_key_env": args.api_key_env, "api_key_header": args.api_key_header,
