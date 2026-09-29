@@ -41,6 +41,7 @@ Choose a profile explicitly for a comparison run:
 |---|---|
 | `profiles/qwen3.8-thinking.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
 | `profiles/qwen3.8-thinking-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
+| `profiles/mimo-v2.6-distill-qwen-9b-thinking.json` | AIME 2026 (30 rows), GPQA Diamond (100), IFEval (100), and BFCL v4 (100), using MiMo sampling and thinking |
 
 The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. Both bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
 
@@ -158,6 +159,47 @@ python3 benchmark.py compare model-no-mtp model-mtp --output results/mtp-compari
 ```
 
 MTP settings appear in `--dry-run` output and are recorded in the run manifest. Resume requires the same MTP settings; existing manifests without MTP settings are treated as disabled. These options apply only to `--gguf`; configure remote services separately. The report table's `MTP` column describes whether the GGUF contains MTP tensors, not whether speculative decoding was enabled.
+
+## MiMo-V2.6-Distill-Qwen-9B
+
+[MiMo-V2.6-Distill-Qwen-9B](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B)
+uses the Qwen3.5 architecture with a MiMo chat template. Its exported GGUF can use
+the existing runner with a llama.cpp build that supports Qwen3.5 and the embedded
+template. Preserve the checkpoint's `chat_template.jinja` as the GGUF
+`tokenizer.chat_template` during export.
+
+```bash
+python3 benchmark.py run \
+  --profile profiles/mimo-v2.6-distill-qwen-9b-thinking.json \
+  --gguf /path/to/MiMo-V2.6-Distill-Qwen-9B.gguf \
+  --model-name mimo-v2.6-distill-qwen-9b \
+  --run-id mimo-v2.6-distill-qwen-9b
+```
+
+The profile follows the checkpoint's
+[`generation_config.json`](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B/blob/main/generation_config.json):
+temperature 0.6, top-p 0.95, and top-k 20. It explicitly enables thinking through
+`chat_template_kwargs.enable_thinking`; MiMo's template does not use Qwen3.8's
+`reasoning_effort`. The 262,144-token generation ceiling matches the native
+context in
+[`config.json`](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B/blob/main/config.json),
+with the same prompt/context behavior described above. The profile explicitly
+disables min-p, presence, and repetition penalties and defaults to one request at
+a time. Each benchmark evaluates at most 100 samples: all 30 AIME 2026 rows,
+the first 100 GPQA Diamond rows, the first 100 IFEval rows, and the first 5 rows
+from each of 20 BFCL non-Web-Search categories (100 total). Shuffling is disabled,
+giving 330 evaluated samples across the suite. These subset scores require the
+same sampled cases for comparisons; the full Qwen3.8 profile uses different
+sample counts.
+
+These are text evaluations and do not require `--mmproj`. BFCL additionally
+requires correct MiMo tool-call parsing: the checkpoint renders compact
+`<tool_call><function=...><parameter=...>` tags, while some llama.cpp builds select
+a Qwen3-Coder parser that expects newlines between these tags. Check structured
+`tool_calls` responses, including parallel calls and tool-result follow-ups, with
+the actual GGUF and server build before relying on BFCL scores. A successful
+`--dry-run` checks the run configuration only; it does not verify inference or
+tool-call parsing.
 
 ## Compare results
 

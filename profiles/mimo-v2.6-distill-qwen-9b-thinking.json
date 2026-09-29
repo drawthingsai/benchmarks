@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "suite": {
+    "id": "mimo-v2.6-distill-qwen-9b-thinking-v2",
+    "title": "MiMo-V2.6-Distill-Qwen-9B reasoning, instruction, and function-calling suite",
+    "description": "A reproducible quick profile with at most 100 samples per benchmark, using the checkpoint's generation_config.json sampling, its native 262,144-token context, and the MiMo chat template with thinking enabled. BFCL selects the first 5 samples from each of 20 non-Web-Search categories and requires a server compatible with MiMo tool calls."
+  },
+  "generation": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 262144,
+    "timeout": 21600,
+    "extra_body": {
+      "min_p": 0.0,
+      "presence_penalty": 0.0,
+      "repeat_penalty": 1.0,
+      "chat_template_kwargs": {"enable_thinking": true}
+    }
+  },
+  "evalscope": {"seed": 42, "eval_batch_size": 1, "dataset_hub": "huggingface", "collect_perf": true},
+  "cases": [
+    {
+      "id": "aime-2026", "dataset": "aime26", "expected_samples": 30, "limit": 100,
+      "dataset_args": {"dataset_id": "math-ai/aime26", "eval_split": "test", "shuffle": false},
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "bfcl-v4-100", "dataset": "bfcl_v4", "expected_samples": 100, "limit": 5,
+      "dataset_args": {
+        "subset_list": [
+          "simple_python", "simple_java", "simple_javascript", "multiple", "parallel",
+          "parallel_multiple", "irrelevance", "live_simple", "live_multiple", "live_parallel",
+          "live_parallel_multiple", "live_irrelevance", "live_relevance", "multi_turn_base",
+          "multi_turn_miss_func", "multi_turn_miss_param", "multi_turn_long_context",
+          "memory_kv", "memory_vector", "memory_rec_sum"
+        ],
+        "shuffle": false,
+        "extra_params": {"is_fc_model": true}
+      },
+      "primary_metric": {"name": "acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "gpqa-diamond-100", "dataset": "gpqa_diamond", "expected_samples": 100, "limit": 100,
+      "dataset_args": {
+        "dataset_id": "Idavidrein/gpqa", "subset_list": ["gpqa_diamond"],
+        "eval_split": "train", "shuffle": false
+      },
+      "primary_metric": {"name": "mean_acc", "direction": "higher", "scale": "fraction"}
+    },
+    {
+      "id": "ifeval-100", "dataset": "ifeval", "expected_samples": 100, "limit": 100,
+      "dataset_args": {"dataset_id": "google/IFEval", "eval_split": "train", "shuffle": false},
+      "primary_metric": {"name": "mean_prompt_level_strict", "direction": "higher", "scale": "fraction"}
+    }
+  ]
+}
