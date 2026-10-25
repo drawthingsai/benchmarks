@@ -226,3 +226,4 @@ outputs/
 profiles/*-aime-gpqa.json
 !results/README.md
 results/
+.workspace/
