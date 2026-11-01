@@ -41,6 +41,7 @@ Choose a profile explicitly for a comparison run:
 |---|---|
 | `profiles/qwen3.8-thinking.json` | AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K (1,002 rows) |
 | `profiles/qwen3.8-thinking-bfcl-non-web.json` | AIME 2026, GPQA Diamond, IFEval, and all 4,906 BFCL v4 non-Web-Search rows |
+| `profiles/deepseek-v41-thinking.json` | DeepSeek V4.1 Flash 1017: AIME 2026, GPQA Diamond, IFEval, and BFCL v4 1K; shared across weight variants |
 
 The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-row Quick sample; the separate `qwen3.8-thinking-bfcl-1k.json` file has been removed. The 1K configuration takes up to the first 56 examples from each of 20 selected non-Web-Search categories with shuffling disabled, including multi-turn and memory tasks. Both bundled BFCL configurations exclude Web Search, so no SerpAPI key is needed; their scores are not the official BFCL v4 Overall score, which includes Web Search.
 
@@ -198,6 +199,50 @@ The URL is the OpenAI-compatible API endpoint. `--model-name` is the API model i
 The bundled GPQA Diamond, AIME 2026, IFEval, BFCL, and GSM8K profiles do not require Docker. A future code-execution benchmark must run with an isolated sandbox.
 
 Results are stored under `runs/<run-id>/`. After an interrupted run, repeat the same command with `--resume`; completed benchmarks and cached samples are reused. Rebuild a report with `python3 benchmark.py report runs/<run-id>`.
+
+## DeepSeek V4.1 Flash 1017
+
+Use an existing OpenAI-compatible SGLang or vLLM endpoint. This runner sends
+requests to the service; it does not launch or convert the HF model. The shared
+profile evaluates AIME 2026 (30), GPQA Diamond (198), IFEval (541), and BFCL v4 1K
+(1,002 sampled non-Web-Search rows). The BFCL score is not the official Overall score.
+
+With the QAT environment already activated in the QuantStar workspace, run from
+this repository:
+
+```bash
+python benchmark.py run \
+  --profile profiles/deepseek-v41-thinking.json \
+  --url http://127.0.0.1:30141/v1 \
+  --model-name DS-V4.1-Flash-1017-official \
+  --parallel 8 \
+  --run-id ds-official-hf-1017 \
+  --output-dir runs
+```
+
+The profile uses temperature 1.0, top_p 1.0, `reasoning_effort=max`, seed 42,
+a **262,144-token output limit per request** (reasoning and final answer together),
+and a 21,600-second request timeout. Its default concurrency is 1; `--parallel 8`
+sets evaluation concurrency to eight. Configure the service to admit eight
+requests as well. This is total request concurrency, not eight requests per GPU.
+
+The current official baseline uses **1,048,576 tokens of context per request**,
+TP8/EP8, `--max-running-requests 8`, and `--chunked-prefill-size 2048` on SGLang.
+The context budget includes the input and generated output. The 2,048-token
+prefill chunk is a processing size, not an input truncation limit. Server context,
+parallelism, KV-cache dtype/layout, attention backend, and exact runtime revisions
+must be recorded alongside the results; the profile does not configure them.
+Concurrency naturally drops below eight when fewer questions remain.
+
+Reuse this profile for official HF weights and QuantStar-derived weights. Select
+the corresponding service with `--url` and `--model-name`, and use a distinct
+`--run-id` for each weight variant. Validate any conversion's added numerical error
+before evaluating a derived version.
+
+The tasks and generation settings match the frozen QuantStar profile used for
+the November 1 baseline. That active run keeps its original profile path and
+output directory for provenance and resume; use this shared profile for subsequent
+runs. No active evaluation needs to be restarted.
 
 ## Reproduce the community baselines
 
