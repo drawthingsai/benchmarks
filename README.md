@@ -47,6 +47,18 @@ The Qwen3.8 comparison profile now uses BFCL v4 1K, replacing its previous 200-r
 
 Datasets are downloaded from Hugging Face. GPQA is gated: accept the [official dataset terms](https://huggingface.co/datasets/Idavidrein/gpqa) and run `hf auth login` before the full profile.
 
+## Profile JSON formatting
+
+Profile JSON files use UTF-8, two-space indentation, expanded objects and arrays,
+and a final newline. Preserve key order and parameter values. With the project
+Python environment activated, format all profiles from the repository root:
+
+```bash
+for profile in profiles/*.json; do
+  python -m json.tool --no-ensure-ascii --indent 2 "$profile" "$profile"
+done
+```
+
 ## Quick vision comparison (200 samples)
 
 Use `prepare_vision_quick.py` to select **100 RealWorldQA** examples (seed 42)
@@ -222,8 +234,8 @@ python benchmark.py run \
 
 The profile uses temperature 1.0, top_p 1.0, `reasoning_effort=max`, seed 42,
 a **262,144-token output limit per request** (reasoning and final answer together),
-and a 21,600-second request timeout. Its default concurrency is 1; `--parallel 8`
-sets evaluation concurrency to eight. Configure the service to admit eight
+and a 21,600-second request timeout. Its default concurrency is 8; use `--parallel`
+to override it. Configure the service to admit eight
 requests as well. This is total request concurrency, not eight requests per GPU.
 
 The current official baseline uses **1,048,576 tokens of context per request**,

@@ -17,7 +17,7 @@
   },
   "evalscope": {
     "seed": 42,
-    "eval_batch_size": 1,
+    "eval_batch_size": 8,
     "dataset_hub": "huggingface",
     "collect_perf": true
   },
