@@ -346,8 +346,10 @@ class EndpointProxy(AbstractContextManager["EndpointProxy"]):
     """Forward requests with round-robin and multi-turn conversation affinity."""
 
     def __init__(self, target_urls: str | list[str], key: str | None,
-                 header: str, prefix: str) -> None:
+                 header: str, prefix: str, upstream_timeout: float = 3600) -> None:
         urls = [target_urls] if isinstance(target_urls, str) else target_urls
+        # Must not be shorter than the client request timeout, otherwise long generations are cut and retried.
+        self.upstream_timeout = upstream_timeout
         self.targets = [validate_url(url) for url in urls]
         self.key, self.header, self.prefix = key, header, prefix
         self.server: ThreadingHTTPServer | None = None
@@ -441,7 +443,7 @@ class EndpointProxy(AbstractContextManager["EndpointProxy"]):
                     + urllib.parse.parse_qsl(incoming.query, keep_blank_values=True))
                 path = f"{base}/{suffix.lstrip('/')}" + (f"?{query}" if query else "")
                 cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
-                connection = cls(target.hostname, target.port, timeout=3600)
+                connection = cls(target.hostname, target.port, timeout=owner.upstream_timeout)
                 try:
                     connection.request(self.command, path, body=body, headers=headers)
                     upstream = connection.getresponse()
@@ -1005,7 +1007,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         with service as endpoint:
             proxy_context = nullcontext() if args.gguf else EndpointProxy(
-                endpoint, key, args.api_key_header, args.api_key_prefix)
+                endpoint, key, args.api_key_header, args.api_key_prefix,
+                max(3600, profile["generation"].get("timeout") or 0) + 300)
             with proxy_context as proxy:
                 child_url = endpoint if args.gguf else proxy.url
                 for case in profile["cases"]:
